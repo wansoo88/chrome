@@ -19,6 +19,9 @@ Thumbs.db
 !.vscode/extensions.json
 .idea/
 
+# Claude Code 로컬 설정 (사용자 개별 환경; 훅 스크립트(.claude/hooks/*)는 버전 관리됨)
+.claude/settings.local.json
+
 # Logs
 *.log
 npm-debug.log*

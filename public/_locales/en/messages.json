@@ -1,0 +1,10 @@
+{
+  "extName": {
+    "message": "X Reply Booster",
+    "description": "Extension name shown in Chrome Web Store and toolbar."
+  },
+  "extDescription": {
+    "message": "Generate 3 in-your-voice replies & thread hints on X. Bring your own AI key. Pay once, no subscription.",
+    "description": "Short description for the store listing."
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "x-reply-booster",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Generate 3 in-your-voice replies & thread hints on X (Twitter). Bring your own AI key. Pay once.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "lint:types": "tsc --noEmit",
+    "zip": "node scripts/zip.mjs"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "2.0.0-beta.28",
+    "@types/chrome": "^0.0.278",
+    "@types/node": "^25.6.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}
