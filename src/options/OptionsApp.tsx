@@ -21,11 +21,11 @@ import type { ServerMsg, VerifyKeyRequest } from '@/shared/messages';
 /**
  * Options 페이지 루트.
  *
- * 설계 주의:
- * - Provider는 OpenAI, OpenRouter만 MVP에서 노출. Anthropic 직접 호출은 CORS 관련
- *   `anthropic-dangerous-direct-browser-access` 헤더가 필요해 CWS 심사 리스크 → Claude 모델은
- *   OpenRouter 경유를 권장.
- * - prompt()/confirm() 네이티브 다이얼로그 대신 자체 modal 사용 (CWS 품질 신호).
+ * 설계:
+ * - 상단 OnboardingStepper로 "무엇을 다음에 할지"가 한 눈에 보이게.
+ * - Provider는 OpenAI, OpenRouter만 MVP UI에 노출 (Anthropic 직접 호출은 CWS 심사 리스크).
+ * - prompt()/confirm() 대신 자체 modal.
+ * - DEV 버튼은 Vite의 import.meta.env.DEV로 프로덕션 번들에서 제거.
  */
 
 const PROVIDER_INFO: Record<
@@ -81,6 +81,8 @@ export function OptionsApp() {
         Your voice on X. Pay once $3.99. Bring your own AI key — it never leaves your browser.
       </div>
 
+      <OnboardingStepper state={state} />
+
       <h2>1. Connect your AI</h2>
       <KeySection current={state.keyConfig} />
 
@@ -96,9 +98,64 @@ export function OptionsApp() {
       <h2>Privacy</h2>
       <div className="card muted" style={{ fontSize: 13 }}>
         This extension stores your key and settings in <code>chrome.storage.local</code> on this
-        device only. Tweet text you choose to process is sent directly from your browser to your
-        chosen AI provider. Nothing reaches the developer's servers.
+        device only. Tweet text you process is sent directly from your browser to your chosen AI
+        provider. Nothing reaches the developer's servers.
+        <div style={{ marginTop: 8, fontSize: 12 }}>
+          <b>Note for bug reports:</b> if you record Network activity in DevTools, your API key
+          appears in the <code>Authorization</code> header. Please redact before sharing.
+        </div>
       </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Stepper
+// ──────────────────────────────────────────────────────────────────────────
+
+function OnboardingStepper({ state }: { state: StorageSchema }) {
+  const keyDone = Boolean(state.keyConfig?.apiKey);
+  const keyVerified = Boolean(state.keyConfig?.lastVerifiedAt);
+  const personaReady = state.personas.some((p) => p.examples.filter((e) => e.trim()).length > 0);
+  const steps = [
+    {
+      label: 'Connect AI',
+      done: keyVerified || keyDone,
+      hint: keyVerified ? 'verified' : keyDone ? 'saved, not yet verified' : 'add your API key',
+    },
+    {
+      label: 'Create persona',
+      done: personaReady,
+      hint: personaReady ? 'ready' : 'add at least 1 example tweet',
+    },
+    {
+      label: 'Try it on X',
+      done: false,
+      hint: 'open x.com, click ✨ on a compose box',
+      action: 'https://x.com/home',
+    },
+  ];
+  return (
+    <div className="stepper">
+      {steps.map((s, i) => (
+        <div key={i} className={`step ${s.done ? 'done' : ''}`}>
+          <span className="bullet">{s.done ? '✓' : i + 1}</span>
+          <div className="body">
+            <div className="label">{s.label}</div>
+            <div className="hint">{s.hint}</div>
+          </div>
+          {s.action && !s.done && (
+            <a
+              className="btn primary small-btn"
+              href={s.action}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open
+            </a>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -114,9 +171,8 @@ function KeySection({ current }: { current: KeyConfig | null }) {
   const [apiKey, setApiKey] = useState<string>(current?.apiKey ?? '');
   const [model, setModel] = useState<string>(current?.model ?? defaultModelFor(provider));
   const [verifying, setVerifying] = useState(false);
-  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string; hint?: string } | null>(null);
 
-  // provider 전환 시 모델이 비어있거나 다른 제공자의 기본값이면 새 기본값으로 교체.
   useEffect(() => {
     const allDefaults = UI_PROVIDERS.map(defaultModelFor);
     setModel((prev) => (!prev || allDefaults.includes(prev) ? defaultModelFor(provider) : prev));
@@ -140,7 +196,8 @@ function KeySection({ current }: { current: KeyConfig | null }) {
         await setKeyConfig({ ...cfg, lastVerifiedAt: Date.now() });
         setMsg({ kind: 'ok', text: 'Verified and saved. You are good to go.' });
       } else if (res && res.ok === false) {
-        setMsg({ kind: 'err', text: res.message });
+        const hint = hintForKeyError(res.message);
+        setMsg({ kind: 'err', text: res.message, hint });
       } else {
         setMsg({ kind: 'err', text: 'Unexpected response from background.' });
       }
@@ -159,7 +216,7 @@ function KeySection({ current }: { current: KeyConfig | null }) {
       lastVerifiedAt: null,
     };
     await setKeyConfig(cfg);
-    setMsg({ kind: 'ok', text: 'Saved. Consider verifying before use.' });
+    setMsg({ kind: 'ok', text: 'Saved. Verify before use to catch typos.' });
   }
 
   async function onClear() {
@@ -189,7 +246,7 @@ function KeySection({ current }: { current: KeyConfig | null }) {
           <a href={info.docUrl} target="_blank" rel="noreferrer">
             Get a key
           </a>
-          . Expect ≈$0.001 per reply with a small model.
+          .
         </div>
       </div>
 
@@ -197,10 +254,11 @@ function KeySection({ current }: { current: KeyConfig | null }) {
         <label>API key</label>
         <input
           type="password"
+          name="xrb-api-key"
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
           placeholder="paste your key"
-          autoComplete="off"
+          autoComplete="new-password"
           spellCheck={false}
         />
         <div className="hint">Stored on this device only. Never sent to the developer.</div>
@@ -217,6 +275,23 @@ function KeySection({ current }: { current: KeyConfig | null }) {
         <div className="hint">{info.modelHint}</div>
       </div>
 
+      <details className="field">
+        <summary className="muted" style={{ cursor: 'pointer' }}>How much will it cost?</summary>
+        <div className="hint" style={{ marginTop: 8 }}>
+          With <code>gpt-4o-mini</code>-class models, each reply costs roughly <b>$0.001</b>.
+          A heavy power user (~50 replies/day) spends <b>~$1.50/month</b>. You can cap spending in
+          your provider dashboard:{' '}
+          <a href="https://platform.openai.com/settings/organization/limits" target="_blank" rel="noreferrer">
+            OpenAI limits
+          </a>{' '}
+          ·{' '}
+          <a href="https://openrouter.ai/settings/credits" target="_blank" rel="noreferrer">
+            OpenRouter credits
+          </a>
+          .
+        </div>
+      </details>
+
       <div className="row">
         <button
           type="button"
@@ -224,7 +299,13 @@ function KeySection({ current }: { current: KeyConfig | null }) {
           onClick={() => void onVerify()}
           disabled={!apiKey.trim() || verifying}
         >
-          {verifying ? 'Verifying…' : 'Verify & save'}
+          {verifying ? (
+            <>
+              <span className="mini-spinner" /> Verifying…
+            </>
+          ) : (
+            'Verify & save'
+          )}
         </button>
         <button
           type="button"
@@ -244,6 +325,11 @@ function KeySection({ current }: { current: KeyConfig | null }) {
       {msg && (
         <div style={{ marginTop: 10 }}>
           <span className={msg.kind === 'ok' ? 'ok' : 'err'}>{msg.text}</span>
+          {msg.hint && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+              {msg.hint}
+            </div>
+          )}
         </div>
       )}
 
@@ -256,9 +342,37 @@ function KeySection({ current }: { current: KeyConfig | null }) {
   );
 }
 
+/**
+ * 키 검증 실패 메시지에 회복 힌트를 붙여줌.
+ */
+function hintForKeyError(raw: string): string | undefined {
+  const s = raw.toLowerCase();
+  if (s.includes('401') || s.includes('unauthorized') || s.includes('invalid'))
+    return 'The key looks invalid or revoked. Generate a fresh one and paste again.';
+  if (s.includes('429') || s.includes('rate')) return 'Rate-limited — wait a minute and retry.';
+  if (s.includes('insufficient') || s.includes('quota') || s.includes('credit'))
+    return 'Provider account is out of credit. Top up and retry.';
+  if (s.includes('network') || s.includes('failed to fetch'))
+    return 'Network issue — check your connection and retry.';
+  return undefined;
+}
+
 // ──────────────────────────────────────────────────────────────────────────
-// Persona section (자체 modal — 네이티브 prompt/confirm 대신)
+// Persona section (자체 modal + 샘플 프리셋)
 // ──────────────────────────────────────────────────────────────────────────
+
+const SAMPLE_PERSONA_PRESET: Omit<Persona, 'id' | 'createdAt' | 'updatedAt'> = {
+  name: 'Builder Dan',
+  toneDescription:
+    'terse, self-aware, building in public. Lower-case. Occasional dry wit. No hashtags.',
+  examples: [
+    'shipped v0.3 last night. 7 users so far. feels like a lot and also like nothing.',
+    'spent 2 hours chasing a bug that was one line. classic.',
+    'best feature requests come from people who already paid.',
+    'the mvp does one thing. that is the feature.',
+    'if you can explain the pricing in 5 seconds you will sell more of it.',
+  ],
+};
 
 function PersonaSection({
   personas,
@@ -291,11 +405,22 @@ function PersonaSection({
     setEditingId(p.id);
   }
 
+  async function onAddSample() {
+    const p: Persona = {
+      ...SAMPLE_PERSONA_PRESET,
+      id: uid('p'),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await savePersona(p);
+    setEditingId(p.id);
+  }
+
   return (
     <div className="card">
       <div className="muted" style={{ marginBottom: 10 }}>
         Teach the AI your voice. Each persona holds example tweets the AI will imitate. More
-        examples = better match.
+        examples = better match — <b>5–10 is the sweet spot; more dilutes the signal.</b>
       </div>
 
       <div className="persona-list">
@@ -311,11 +436,7 @@ function PersonaSection({
               <button type="button" className="small-btn" onClick={() => setEditingId(p.id)}>
                 Edit
               </button>
-              <button
-                type="button"
-                className="small-btn"
-                onClick={() => setConfirmDelete(p)}
-              >
+              <button type="button" className="small-btn" onClick={() => setConfirmDelete(p)}>
                 Delete
               </button>
             </div>
@@ -333,6 +454,11 @@ function PersonaSection({
         >
           + New persona
         </button>
+        {personas.length === 0 && (
+          <button type="button" className="btn" onClick={() => void onAddSample()}>
+            Try a sample (Builder Dan)
+          </button>
+        )}
         <span className="muted">{personas.length}/10</span>
       </div>
 
@@ -382,6 +508,10 @@ function PersonaEditor({ persona, onClose }: { persona: Persona; onClose: () => 
   const [examples, setExamples] = useState<string[]>(
     persona.examples.length ? persona.examples : [''],
   );
+  const [saved, setSaved] = useState(false);
+
+  const filledCount = examples.filter((e) => e.trim()).length;
+  const atCap = examples.length >= 10;
 
   async function onSave() {
     const trimmed = examples.map((e) => e.trim()).filter(Boolean);
@@ -392,7 +522,26 @@ function PersonaEditor({ persona, onClose }: { persona: Persona; onClose: () => 
       examples: trimmed.slice(0, 10),
       updatedAt: Date.now(),
     });
-    onClose();
+    setSaved(true);
+  }
+
+  if (saved) {
+    return (
+      <div>
+        <div className="ok" style={{ fontWeight: 600 }}>Saved. ready to try on X.</div>
+        <div className="muted" style={{ marginTop: 6 }}>
+          Open x.com, focus any reply box, and click the ✨ icon that appears in the toolbar.
+        </div>
+        <div className="row" style={{ marginTop: 10 }}>
+          <a className="btn primary" href="https://x.com/home" target="_blank" rel="noreferrer">
+            Open X →
+          </a>
+          <button type="button" className="btn" onClick={onClose}>
+            Back
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -410,11 +559,11 @@ function PersonaEditor({ persona, onClose }: { persona: Persona; onClose: () => 
           placeholder={'e.g. terse, dry, building in public, occasional sarcasm'}
           maxLength={400}
         />
-        <div className="hint">Shortest useful description. Examples do most of the work.</div>
+        <div className="hint">Short is better. Examples do most of the work.</div>
       </div>
 
       <div className="field">
-        <label>Example tweets (up to 10)</label>
+        <label>Example tweets (5–10 is the sweet spot)</label>
         <div className="example-list">
           {examples.map((ex, idx) => (
             <div className="example-row" key={idx}>
@@ -442,11 +591,13 @@ function PersonaEditor({ persona, onClose }: { persona: Persona; onClose: () => 
             type="button"
             className="small-btn"
             onClick={() => setExamples([...examples, ''])}
-            disabled={examples.length >= 10}
+            disabled={atCap}
           >
             + Add example
           </button>
-          <span className="muted">{examples.filter((e) => e.trim()).length} used / 10</span>
+          <span className="muted">
+            {filledCount} used / 10 {atCap && ' · limit reached (more examples dilute the voice)'}
+          </span>
         </div>
       </div>
 
@@ -491,24 +642,26 @@ function PreferencesSection({ state }: { state: StorageSchema }) {
         </select>
       </div>
 
-      <div className="field">
-        <label>Free daily limit (dev)</label>
-        <select
-          value={String(state.settings.dailyFreeLimit)}
-          onChange={async (e) => {
-            const v = Number(e.target.value);
-            await updateState((s) => {
-              s.settings.dailyFreeLimit = v;
-            });
-          }}
-        >
-          <option value="5">5 (default)</option>
-          <option value="3">3</option>
-          <option value="10">10</option>
-          <option value="1">1</option>
-        </select>
-        <div className="hint">Users see this via upgrade prompts; dev can tune while testing.</div>
-      </div>
+      {import.meta.env.DEV && (
+        <div className="field">
+          <label>Free daily limit (dev)</label>
+          <select
+            value={String(state.settings.dailyFreeLimit)}
+            onChange={async (e) => {
+              const v = Number(e.target.value);
+              await updateState((s) => {
+                s.settings.dailyFreeLimit = v;
+              });
+            }}
+          >
+            <option value="5">5 (default)</option>
+            <option value="3">3</option>
+            <option value="10">10</option>
+            <option value="1">1</option>
+          </select>
+          <div className="hint">DEV only — hidden in production builds.</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -526,23 +679,25 @@ function LicenseSection({ paid }: { paid: boolean }) {
           <div className="muted" style={{ marginTop: 4 }}>
             Unlimited generations · Up to 10 personas.
           </div>
-          <div className="row" style={{ marginTop: 10 }}>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => void devSetPaid(false)}
-              title="Dev only — revert to free for testing."
-            >
-              DEV: revert to free
-            </button>
-          </div>
+          {import.meta.env.DEV && (
+            <div className="row" style={{ marginTop: 10 }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void devSetPaid(false)}
+                title="Dev only — revert to free for testing."
+              >
+                DEV: revert to free
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div>
           <div style={{ fontWeight: 600, fontSize: 15 }}>Upgrade — $3.99 once, forever</div>
           <ul className="muted" style={{ margin: '8px 0 0 18px', padding: 0 }}>
-            <li>Unlimited generations</li>
-            <li>Up to 10 personas</li>
+            <li>Unlimited generations (free is 5/day)</li>
+            <li>Up to 10 personas (free is 1)</li>
             <li>Thread hints for mid-compose suggestions</li>
           </ul>
           <div className="row" style={{ marginTop: 10 }}>
@@ -553,14 +708,16 @@ function LicenseSection({ paid }: { paid: boolean }) {
             >
               Upgrade
             </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => void devSetPaid(true)}
-              title="Dev only — simulate paid state for testing."
-            >
-              DEV: mark paid
-            </button>
+            {import.meta.env.DEV && (
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void devSetPaid(true)}
+                title="Dev only — simulate paid state for testing."
+              >
+                DEV: mark paid
+              </button>
+            )}
           </div>
           <div className="hint" style={{ marginTop: 8 }}>
             Payments are processed by ExtensionPay (connected once the developer account is
@@ -573,7 +730,7 @@ function LicenseSection({ paid }: { paid: boolean }) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// 자체 modal — 네이티브 prompt/confirm 대신 사용. Chrome 확장 심사 품질 신호.
+// 자체 modal
 // ──────────────────────────────────────────────────────────────────────────
 
 function ModalShell({

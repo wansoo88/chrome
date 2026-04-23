@@ -130,3 +130,63 @@ body {
   display: flex;
   gap: 8px;
 }
+
+.stat.warn {
+  border-color: rgba(244, 33, 46, 0.5);
+  background: rgba(244, 33, 46, 0.06);
+}
+
+.checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.check.done {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.check .bullet {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--chip-bg);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 11px;
+}
+
+.check.done .bullet {
+  background: rgba(0, 186, 124, 0.15);
+  color: rgb(0, 186, 124);
+}
+
+.actions {
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn.grow {
+  flex: 1;
+  text-align: center;
+  display: inline-flex;
+  justify-content: center;
+}
+
+.btn.ghost {
+  background: transparent;
+}

@@ -78,10 +78,18 @@ export interface ServerErr {
   ok: false;
   code: ErrorCode;
   message: string;
+  /** 원문 provider 에러 (개발자/고급 유저용). UI에선 code 기반 친화 메시지를 우선 노출. */
+  details?: string;
+  /** code === 'PROVIDER_ERROR'일 때 세부 분류 — UI 버튼 분기에 사용. */
+  providerCode?: 'invalid_key' | 'rate_limit' | 'no_quota' | 'generic';
 }
 
 export type ServerMsg = GenerateOk | Overview | Pong | VerifyKeyOk | ServerErr;
 
-export function asServerErr(code: ErrorCode, message: string): ServerErr {
-  return { kind: 'error', ok: false, code, message };
+export function asServerErr(
+  code: ErrorCode,
+  message: string,
+  extra?: Pick<ServerErr, 'details' | 'providerCode'>,
+): ServerErr {
+  return { kind: 'error', ok: false, code, message, ...extra };
 }

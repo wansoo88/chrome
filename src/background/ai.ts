@@ -3,12 +3,37 @@ import type { PromptPair } from '@/shared/prompt';
 import { parseSuggestions } from '@/shared/prompt';
 
 /**
- * AI 제공자별 호출 구현.
+ * AI 제공자 호출.
  * 원칙:
- * - background service worker에서만 실행 (키가 다른 컨텍스트에 노출되지 않도록).
- * - 실패 시 원문 에러 메시지를 보존하여 UI에 표시 (유저 디버깅 가능).
- * - 응답 파싱은 parseSuggestions가 담당 (여러 구분 방식 폴백).
+ * - background service worker에서만 실행 → 키가 content/popup/options에 노출되지 않음.
+ * - 에러는 `ProviderError`로 분류하여 UI가 사용자 친화 메시지 매핑 가능하게 함.
+ * - OpenAI/OpenRouter는 OpenAI-호환 프로토콜 공유 → 공통 헬퍼 재사용. Anthropic만 이질.
  */
+
+export type ProviderErrorCode =
+  | 'invalid_key'
+  | 'rate_limit'
+  | 'no_quota'
+  | 'generic';
+
+export class ProviderError extends Error {
+  readonly code: ProviderErrorCode;
+  readonly status: number | null;
+  readonly providerName: string;
+
+  constructor(
+    code: ProviderErrorCode,
+    status: number | null,
+    providerName: string,
+    message: string,
+  ) {
+    super(message);
+    this.code = code;
+    this.status = status;
+    this.providerName = providerName;
+    this.name = 'ProviderError';
+  }
+}
 
 export interface GenerateOpts {
   cfg: KeyConfig;
@@ -20,24 +45,48 @@ export async function generate(opts: GenerateOpts): Promise<string[]> {
   const { cfg } = opts;
   switch (cfg.provider) {
     case 'openai':
-      return callOpenAI(opts);
+      return callOpenAICompatible({
+        ...opts,
+        url: 'https://api.openai.com/v1/chat/completions',
+        providerName: 'OpenAI',
+        defaultModel: 'gpt-4o-mini',
+      });
+    case 'openrouter':
+      return callOpenAICompatible({
+        ...opts,
+        url: 'https://openrouter.ai/api/v1/chat/completions',
+        providerName: 'OpenRouter',
+        defaultModel: 'openai/gpt-4o-mini',
+        extraHeaders: {
+          // Referer는 확장 URL 자체로 — 개발자 식별자 노출 없이 집계만 가능.
+          'HTTP-Referer': chrome.runtime.getURL('/'),
+          'X-Title': 'X Reply Booster',
+        },
+      });
     case 'anthropic':
       return callAnthropic(opts);
-    case 'openrouter':
-      return callOpenRouter(opts);
   }
 }
 
-async function callOpenAI({ cfg, prompt, signal }: GenerateOpts): Promise<string[]> {
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+interface OpenAICompatibleOpts extends GenerateOpts {
+  url: string;
+  providerName: string;
+  defaultModel: string;
+  extraHeaders?: Record<string, string>;
+}
+
+async function callOpenAICompatible(opts: OpenAICompatibleOpts): Promise<string[]> {
+  const { cfg, prompt, signal, url, providerName, defaultModel, extraHeaders } = opts;
+  const res = await fetch(url, {
     method: 'POST',
     signal,
     headers: {
       Authorization: `Bearer ${cfg.apiKey}`,
       'Content-Type': 'application/json',
+      ...extraHeaders,
     },
     body: JSON.stringify({
-      model: cfg.model || 'gpt-4o-mini',
+      model: cfg.model || defaultModel,
       temperature: 0.8,
       max_tokens: 600,
       messages: [
@@ -46,7 +95,7 @@ async function callOpenAI({ cfg, prompt, signal }: GenerateOpts): Promise<string
       ],
     }),
   });
-  if (!res.ok) throw await toHttpError(res, 'OpenAI');
+  if (!res.ok) throw await toProviderError(res, providerName);
   const data = (await res.json()) as {
     choices?: { message?: { content?: string } }[];
   };
@@ -72,10 +121,8 @@ async function callAnthropic({ cfg, prompt, signal }: GenerateOpts): Promise<str
       messages: [{ role: 'user', content: prompt.user }],
     }),
   });
-  if (!res.ok) throw await toHttpError(res, 'Anthropic');
-  const data = (await res.json()) as {
-    content?: { type: string; text?: string }[];
-  };
+  if (!res.ok) throw await toProviderError(res, 'Anthropic');
+  const data = (await res.json()) as { content?: { type: string; text?: string }[] };
   const text =
     data.content
       ?.filter((c) => c.type === 'text')
@@ -84,52 +131,40 @@ async function callAnthropic({ cfg, prompt, signal }: GenerateOpts): Promise<str
   return parseSuggestions(text);
 }
 
-async function callOpenRouter({ cfg, prompt, signal }: GenerateOpts): Promise<string[]> {
-  // OpenRouter는 호출 집계/크레딧 할당을 위해 HTTP-Referer와 X-Title을 권장.
-  // Referer는 사용자 확장 URL 자체로 — 개발자 식별자를 외부에 노출하지 않음.
-  const referer = chrome.runtime.getURL('/');
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    signal,
-    headers: {
-      Authorization: `Bearer ${cfg.apiKey}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': referer,
-      'X-Title': 'X Reply Booster',
-    },
-    body: JSON.stringify({
-      model: cfg.model || 'openai/gpt-4o-mini',
-      temperature: 0.8,
-      max_tokens: 600,
-      messages: [
-        { role: 'system', content: prompt.system },
-        { role: 'user', content: prompt.user },
-      ],
-    }),
-  });
-  if (!res.ok) throw await toHttpError(res, 'OpenRouter');
-  const data = (await res.json()) as {
-    choices?: { message?: { content?: string } }[];
-  };
-  const text = data.choices?.[0]?.message?.content ?? '';
-  return parseSuggestions(text);
-}
-
-async function toHttpError(res: Response, providerName: string): Promise<Error> {
-  let body = '';
+/**
+ * HTTP 응답 → ProviderError. code는 이후 i18n 매핑에 사용된다.
+ */
+async function toProviderError(res: Response, providerName: string): Promise<ProviderError> {
+  const status = res.status;
+  let bodyMsg = '';
   try {
-    body = await res.text();
+    const text = await res.text();
+    // OpenAI/OpenRouter/Anthropic 모두 { error: { message } } 형식을 사용.
+    try {
+      const json = JSON.parse(text) as { error?: { message?: string } };
+      bodyMsg = json?.error?.message ?? text;
+    } catch {
+      bodyMsg = text;
+    }
   } catch {
     /* ignore */
   }
-  // 긴 HTML 오류 페이지를 요약.
-  const snippet = body.length > 400 ? body.slice(0, 400) + '…' : body;
-  return new Error(`${providerName} ${res.status}: ${snippet || res.statusText}`);
+  const snippet = bodyMsg.length > 400 ? bodyMsg.slice(0, 400) + '…' : bodyMsg;
+
+  const code: ProviderErrorCode =
+    status === 401 || status === 403
+      ? 'invalid_key'
+      : status === 429
+        ? 'rate_limit'
+        : status === 402 || /credit|balance|quota|insufficient/i.test(bodyMsg)
+          ? 'no_quota'
+          : 'generic';
+
+  return new ProviderError(code, status, providerName, `${providerName} ${status}: ${snippet}`);
 }
 
 /**
- * 키 유효성 검증 — Options 페이지 "Verify" 버튼에서 사용.
- * 가장 싼 엔드포인트로 왕복.
+ * 키 유효성 검증 — Options "Verify" 버튼에서 사용. 토큰 소비 최소화 경로 선택.
  */
 export async function verifyKey(cfg: KeyConfig): Promise<{ ok: boolean; error?: string }> {
   try {
@@ -142,7 +177,6 @@ export async function verifyKey(cfg: KeyConfig): Promise<{ ok: boolean; error?: 
         return { ok: false, error: await readErrMessage(r) };
       }
       case 'anthropic': {
-        // Anthropic은 저렴한 검증 엔드포인트가 없어 최소 1토큰 호출로 대체.
         const r = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: {

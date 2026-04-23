@@ -33,6 +33,8 @@ function joinExamples(examples: string[]): string {
 export function buildPrompt(input: BuildPromptInput): PromptPair {
   const { mode, persona, originalTweet, draft, languagePref } = input;
 
+  // system 블록이지만 mode에 따라 기본 언어 폴백이 다름 — reply는 원문 언어에 맞추고,
+  // threadHint는 사용자가 이미 쓰기 시작한 언어(draft) 우선. 명시적 languagePref가 있으면 그 값 고정.
   const languageDirective =
     languagePref === 'auto'
       ? mode === 'reply'

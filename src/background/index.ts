@@ -15,8 +15,8 @@ import type {
   ServerMsg,
   VerifyKeyOk,
 } from '@/shared/messages';
-import { generate, verifyKey } from './ai';
-import type { Persona } from '@/shared/types';
+import { generate, ProviderError, verifyKey } from './ai';
+import { t } from '@/shared/i18n';
 
 /**
  * Service Worker 엔트리.
@@ -25,7 +25,8 @@ import type { Persona } from '@/shared/types';
  * - content script / popup / options의 메시지 라우팅 (단일 onMessage 리스너)
  * - AI 호출 (content script에서 직접 fetch 금지)
  * - 라이선스 게이트 검증
- * - 무료 한도 카운팅 — 동시 요청의 race condition을 막기 위해 inflight Promise queue로 직렬화
+ * - 무료 한도 카운팅 직렬화 — navigator.locks 우선, 미지원 시 Promise chain 폴백.
+ * - 새 generate 요청이 들어오면 이전 요청의 fetch를 AbortController로 취소 → AI 토큰 낭비 제거.
  */
 
 const MANIFEST_VERSION = chrome.runtime.getManifest().version;
@@ -37,19 +38,26 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
   }
 });
 
-// generate 호출을 단일 큐로 직렬화 — usage counter race + storage RMW race 제거.
-// MV3 service worker는 수 분 후 suspend 되지만 큐는 resume 시 새로 시작되어 무해.
-let generateQueue: Promise<unknown> = Promise.resolve();
-function enqueue<T>(fn: () => Promise<T>): Promise<T> {
-  const next = generateQueue.then(fn, fn);
-  // 큐 체인에서 실패가 다음 작업을 깨지 않도록 catch.
-  generateQueue = next.catch(() => undefined);
+/**
+ * generate 직렬화 + 이전 요청 abort. 새 요청이 오면 이전 fetch를 취소해 토큰 소비를 멈춘다.
+ * storage RMW race 방지를 위해 lock 내부에서만 usage를 건드린다.
+ */
+let currentGenerateAC: AbortController | null = null;
+let queueFallback: Promise<unknown> = Promise.resolve();
+
+async function withLock<T>(fn: () => Promise<T>): Promise<T> {
+  // MV3 SW(Chrome 95+) 에서 Web Locks API 지원. suspend 중에도 re-acquire 안전.
+  const locks = (navigator as Navigator & { locks?: LockManager }).locks;
+  if (locks && typeof locks.request === 'function') {
+    return locks.request('xrb-generate', fn);
+  }
+  const next = queueFallback.then(fn, fn);
+  queueFallback = next.catch(() => undefined);
   return next;
 }
 
 chrome.runtime.onMessage.addListener(
   (msg: ClientMsg, _sender, sendResponse: (res: ServerMsg) => void) => {
-    // 타입 가드 — 알 수 없는 형태의 메시지는 무시 (다른 확장과의 충돌 방지).
     if (!msg || typeof msg !== 'object' || typeof (msg as { kind?: unknown }).kind !== 'string') {
       return false;
     }
@@ -71,27 +79,43 @@ chrome.runtime.onMessage.addListener(
               const out: VerifyKeyOk = { kind: 'verifyKeyOk', ok: true };
               sendResponse(out);
             } else {
-              sendResponse(asServerErr('PROVIDER_ERROR', r.error ?? 'Verification failed.'));
+              sendResponse(
+                asServerErr('PROVIDER_ERROR', r.error ?? 'Verification failed.', {
+                  details: r.error,
+                }),
+              );
             }
             return;
           }
           case 'generate': {
-            const out = await enqueue(() => handleGenerate(msg));
-            sendResponse(out);
+            // 이전 in-flight 요청 취소 → AI 토큰 낭비 제거.
+            currentGenerateAC?.abort();
+            const ac = new AbortController();
+            currentGenerateAC = ac;
+            try {
+              const out = await withLock(() => handleGenerate(msg, ac.signal));
+              sendResponse(out);
+            } finally {
+              if (currentGenerateAC === ac) currentGenerateAC = null;
+            }
             return;
           }
           default: {
-            // exhaustive check — 새 메시지 타입이 추가되면 컴파일 에러.
             const _exhaustive: never = msg;
             void _exhaustive;
-            sendResponse(asServerErr('UNKNOWN', 'Unknown message kind'));
+            sendResponse(asServerErr('UNKNOWN', t('err_unknown')));
           }
         }
       } catch (e) {
-        sendResponse(asServerErr('UNKNOWN', (e as Error).message || 'Unknown error'));
+        // AbortError는 사용자가 다른 요청으로 갈아탄 정상 경로 — 에러로 올리지 않음.
+        const err = e as Error;
+        if (err.name === 'AbortError') {
+          sendResponse(asServerErr('UNKNOWN', 'Request aborted'));
+          return;
+        }
+        sendResponse(asServerErr('UNKNOWN', err.message || t('err_unknown')));
       }
     })();
-    // async 응답 유지 계약.
     return true;
   },
 );
@@ -113,32 +137,26 @@ async function buildOverview(): Promise<Overview> {
 
 async function handleGenerate(
   req: Extract<ClientMsg, { kind: 'generate' }>,
+  signal: AbortSignal,
 ): Promise<ServerMsg> {
   const cfg = await getKeyConfig();
   if (!cfg?.apiKey) {
-    return asServerErr(
-      'API_KEY_MISSING',
-      'Add your AI provider key in Options to start generating.',
-    );
+    return asServerErr('API_KEY_MISSING', t('err_api_key_missing'));
   }
 
-  // 자정 리셋 보장 후 본 상태 획득.
   const state = await ensureUsageFresh();
 
   const personaId = req.personaId ?? state.settings.activePersonaId;
   const persona = personaId ? state.personas.find((p) => p.id === personaId) : undefined;
   if (!persona) {
-    return asServerErr(
-      'PERSONA_MISSING',
-      'Create at least one persona in Options. This teaches the AI your voice.',
-    );
+    return asServerErr('PERSONA_MISSING', t('err_persona_missing'));
   }
 
   const paid = await licenseGateway.checkPaid();
   if (!paid && state.usage.count >= state.settings.dailyFreeLimit) {
     return asServerErr(
       'QUOTA_EXCEEDED',
-      `Daily free limit reached (${state.settings.dailyFreeLimit}). Upgrade to unlock unlimited generations.`,
+      t('err_quota_exceeded', { limit: state.settings.dailyFreeLimit }),
     );
   }
 
@@ -152,16 +170,31 @@ async function handleGenerate(
 
   let suggestions: string[];
   try {
-    suggestions = await generate({ cfg, prompt });
+    suggestions = await generate({ cfg, prompt, signal });
   } catch (e) {
-    return asServerErr('PROVIDER_ERROR', (e as Error).message || 'Provider call failed');
+    if ((e as Error).name === 'AbortError') {
+      // 상위 catch에서 별도 처리 — 여기선 전파.
+      throw e;
+    }
+    if (e instanceof ProviderError) {
+      const friendly =
+        e.code === 'invalid_key'
+          ? t('err_provider_invalid_key')
+          : e.code === 'rate_limit'
+            ? t('err_provider_rate_limit')
+            : e.code === 'no_quota'
+              ? t('err_provider_no_quota')
+              : t('err_provider_generic');
+      return asServerErr('PROVIDER_ERROR', friendly, {
+        details: e.message,
+        providerCode: e.code,
+      });
+    }
+    return asServerErr('PROVIDER_ERROR', (e as Error).message || t('err_provider_generic'));
   }
 
   if (!suggestions.length) {
-    return asServerErr(
-      'INVALID_RESPONSE',
-      'Model returned empty output. Try again, or change model in Options.',
-    );
+    return asServerErr('INVALID_RESPONSE', t('err_invalid_response'));
   }
 
   let remainingToday: number | null = null;
@@ -177,20 +210,4 @@ async function handleGenerate(
     remainingToday,
   };
   return out;
-}
-
-/**
- * persona 팩토리 — Options UI가 이 유틸을 쓰기 원하면 shared/id로 대체 가능.
- * 현재 OptionsApp은 shared/id.uid()를 직접 사용하므로 이 헬퍼는 필요 시만 import.
- */
-export function makeBlankPersona(name: string): Persona {
-  const now = Date.now();
-  return {
-    id: crypto.randomUUID(),
-    name,
-    toneDescription: '',
-    examples: [],
-    createdAt: now,
-    updatedAt: now,
-  };
 }

@@ -1,15 +1,16 @@
 import type { ClientMsg, ServerMsg } from '@/shared/messages';
+import { t } from '@/shared/i18n';
 import { findComposeTextareas, findOriginalTweet } from './selectors';
 
 /**
- * X 컴포즈 영역 옆에 ✨ 버튼을 주입하고, 클릭 시 팝오버로 3안을 제공.
+ * X 컴포즈 영역 옆에 ✨ 버튼을 주입하고 클릭 시 팝오버로 3안을 제공.
  *
- * 동작 원칙:
- * - Shadow DOM으로 CSS 완전 격리.
- * - 단일 MutationObserver + requestAnimationFrame 디바운스 → 성능 안전.
- * - WeakSet으로 이미 장착된 textarea 중복 방지. host가 DOM에서 떨어지면 WeakSet에서도 제거.
- * - SPA 네비게이션(pushState/popstate) 시 열린 팝오버 자동 close.
- * - 뷰포트 하단 compose에선 팝오버를 위로 플립, 스크롤/리사이즈 시 close(재포지셔닝 복잡성 회피).
+ * 설계 원칙:
+ * - Shadow DOM으로 CSS 완전 격리 (open mode 유지 — closed로 바꿔도 페이지 스크립트의
+ *   실질적 가치 탈취 경로 없음. e2e 테스트 용이성 우선).
+ * - 단일 MutationObserver + rAF 디바운스 → 프레임당 최대 1회 스캔.
+ * - 팝오버 키보드 내비(↑↓/Enter/Esc) + role=listbox/option으로 접근성 커버.
+ * - 새 팝오버 열면 이전 요청은 background가 abort (토큰 낭비 제거).
  */
 
 interface Mount {
@@ -17,20 +18,23 @@ interface Mount {
   host: HTMLElement;
 }
 
+const POPOVER_WIDTH = 420;
+const POPOVER_MAX_HEIGHT = 420;
+const POPOVER_MIN_HEIGHT = 160;
+const POPOVER_GAP = 8;
+const VIEWPORT_MARGIN = 12;
+const FLIP_SPACE_THRESHOLD = 200;
+
 const mounts = new Set<Mount>();
 const mountedTextareas = new WeakSet<HTMLElement>();
 let rafId: number | null = null;
 let currentPopover: PopoverHandle | null = null;
 
 export function startInjector(): () => void {
-  // DOM 변경 관찰 — 단일 observer로 모든 compose 탐지.
-  const domObserver = new MutationObserver(() => {
-    scheduleScan();
-  });
+  const domObserver = new MutationObserver(() => scheduleScan());
   domObserver.observe(document.body, { childList: true, subtree: true });
 
-  // SPA 네비게이션 감지 — X는 pushState로 라우팅 전환 시 content를 재구성하므로
-  // 열린 팝오버는 바로 닫는 것이 사용자가 가장 덜 놀람.
+  // SPA 네비게이션 감지 — 팝오버 자동 close.
   const navHandler = () => currentPopover?.close();
   window.addEventListener('popstate', navHandler);
   const origPush = history.pushState;
@@ -69,10 +73,6 @@ function scanAndMount() {
   }
 }
 
-/**
- * X가 compose 노드를 제거했거나 재사용했을 때 우리 host도 정리하고, textarea가 재등장하면
- * 다시 장착될 수 있도록 WeakSet에서 빼줌.
- */
 function pruneDeadMounts() {
   for (const m of [...mounts]) {
     if (!document.contains(m.host) || !document.contains(m.textarea)) {
@@ -173,18 +173,21 @@ async function openPopoverFor(textarea: HTMLElement, anchor: HTMLElement): Promi
   try {
     res = (await chrome.runtime.sendMessage(req)) as ServerMsg | undefined;
   } catch (e) {
-    ui.showError(
-      'Could not reach the extension background. Try reloading the page.',
-      (e as Error).message,
-    );
+    ui.showError({ message: t('err_no_background'), details: (e as Error).message });
     return;
   }
   if (!res) {
-    ui.showError('No response from background. Try reloading the page.');
+    ui.showError({ message: t('err_no_background') });
     return;
   }
   if (res.ok === false) {
-    ui.showError(res.message || 'Unknown error', res.code);
+    ui.showError({
+      message: res.message,
+      details: res.details,
+      code: res.code,
+      providerCode: res.providerCode,
+      onRetry: () => void openPopoverFor(textarea, anchor),
+    });
     return;
   }
   if (res.kind === 'generateOk') {
@@ -194,7 +197,7 @@ async function openPopoverFor(textarea: HTMLElement, anchor: HTMLElement): Promi
     });
     return;
   }
-  ui.showError('Unexpected response.', 'INVALID_RESPONSE');
+  ui.showError({ message: t('err_unknown'), code: 'INVALID_RESPONSE' });
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -202,18 +205,18 @@ async function openPopoverFor(textarea: HTMLElement, anchor: HTMLElement): Promi
 // ──────────────────────────────────────────────────────────────────────────
 
 function readDraft(textarea: HTMLElement): string {
-  // NBSP( )를 일반 공백으로 정규화 — X의 contenteditable이 연속 공백을 NBSP로 치환하는 경우 보정.
+  // X의 contenteditable이 연속 공백을 NBSP(U+00A0)로 치환하므로 일반 공백으로 정규화.
   return (textarea.innerText ?? '').replace(/ /g, ' ').trim();
 }
 
 /**
- * X의 React controlled input에 값을 반영하는 유일하게 안정적인 경로.
- * execCommand는 deprecated이지만 2026-04 기준 Chrome + X 조합에서 작동 확인.
- * 빈 textarea는 delete가 placeholder 노드를 건드릴 수 있으므로 생략.
+ * React controlled input에 값 반영. 빈 textarea(placeholder 상태)는 delete를 생략 —
+ * X의 placeholder 노드를 건드리면 post 버튼이 비활성화되는 이슈 회피.
+ * dispatchEvent에 text data를 담지 않아 제3자 user-script가 AI 응답을 수집하지 못하게 함.
  */
 function insertIntoTextarea(textarea: HTMLElement, text: string) {
   textarea.focus();
-  const existing = (textarea.innerText ?? '').replace(/ /g, ' ').trim();
+  const existing = readDraft(textarea);
   if (existing) {
     const selection = window.getSelection();
     if (selection) {
@@ -225,7 +228,7 @@ function insertIntoTextarea(textarea: HTMLElement, text: string) {
     try {
       document.execCommand('delete', false);
     } catch {
-      /* 폴백: 그냥 뒤에 이어 붙임. */
+      /* 폴백: 이어 붙임. */
     }
   }
   try {
@@ -233,16 +236,24 @@ function insertIntoTextarea(textarea: HTMLElement, text: string) {
   } catch {
     textarea.textContent = text;
   }
-  textarea.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+  textarea.dispatchEvent(new InputEvent('input', { bubbles: true }));
 }
 
 // ──────────────────────────────────────────────────────────────────────────
 // 팝오버 UI (Shadow DOM, vanilla)
 // ──────────────────────────────────────────────────────────────────────────
 
+interface ErrorInfo {
+  message: string;
+  details?: string;
+  code?: string;
+  providerCode?: 'invalid_key' | 'rate_limit' | 'no_quota' | 'generic';
+  onRetry?: () => void;
+}
+
 interface PopoverFullHandle extends PopoverHandle {
   showLoading(): void;
-  showError(msg: string, code?: string): void;
+  showError(err: ErrorInfo): void;
   showSuggestions(
     suggestions: string[],
     remaining: number | null,
@@ -250,18 +261,12 @@ interface PopoverFullHandle extends PopoverHandle {
   ): void;
 }
 
-const POPOVER_MAX_HEIGHT = 420;
-const POPOVER_GAP = 8;
-
 function detectDark(): boolean {
-  // X의 `html` 또는 `body`에 라이트/다크 관련 클래스·인라인 스타일이 있는지 우선 체크.
   const root = document.documentElement;
   const body = document.body;
-  const inlineColorScheme =
-    (root.style.colorScheme || '') + ' ' + (body.style.colorScheme || '');
+  const inlineColorScheme = (root.style.colorScheme || '') + ' ' + (body.style.colorScheme || '');
   if (inlineColorScheme.includes('dark')) return true;
   if (inlineColorScheme.includes('light')) return false;
-  // body 배경색 샘플 — X의 Dim(#15202b)/Lights out(#000000)는 luminance가 낮음.
   const bg = getComputedStyle(body).backgroundColor;
   const m = bg.match(/\d+/g);
   if (m && m.length >= 3) {
@@ -281,22 +286,20 @@ function createPopoverAt(anchor: HTMLElement): PopoverFullHandle {
   const rect = anchor.getBoundingClientRect();
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  const width = Math.min(420, vw - 24);
+  const width = Math.min(POPOVER_WIDTH, vw - VIEWPORT_MARGIN * 2);
   let left = rect.left;
-  if (left + width > vw - 12) left = vw - width - 12;
-  if (left < 12) left = 12;
+  if (left + width > vw - VIEWPORT_MARGIN) left = vw - width - VIEWPORT_MARGIN;
+  if (left < VIEWPORT_MARGIN) left = VIEWPORT_MARGIN;
 
-  // 아래 여유 공간이 팝오버 최대 높이보다 적으면 위로 플립.
   const spaceBelow = vh - rect.bottom - POPOVER_GAP;
   const spaceAbove = rect.top - POPOVER_GAP;
   let top: number;
   let maxHeight: number;
-  if (spaceBelow < 200 && spaceAbove > spaceBelow) {
-    // flip: 위쪽에 배치. bottom anchor.
-    maxHeight = Math.min(POPOVER_MAX_HEIGHT, Math.max(160, spaceAbove));
-    top = Math.max(12, rect.top - POPOVER_GAP - maxHeight);
+  if (spaceBelow < FLIP_SPACE_THRESHOLD && spaceAbove > spaceBelow) {
+    maxHeight = Math.min(POPOVER_MAX_HEIGHT, Math.max(POPOVER_MIN_HEIGHT, spaceAbove));
+    top = Math.max(VIEWPORT_MARGIN, rect.top - POPOVER_GAP - maxHeight);
   } else {
-    maxHeight = Math.min(POPOVER_MAX_HEIGHT, Math.max(160, spaceBelow));
+    maxHeight = Math.min(POPOVER_MAX_HEIGHT, Math.max(POPOVER_MIN_HEIGHT, spaceBelow));
     top = rect.bottom + POPOVER_GAP;
   }
 
@@ -308,89 +311,69 @@ function createPopoverAt(anchor: HTMLElement): PopoverFullHandle {
   const shadow = host.attachShadow({ mode: 'open' });
   const isDark = detectDark();
 
+  // CSS 변수로 팔레트 분리 — 다크/라이트 단일 스타일 블록에서 토글.
   shadow.innerHTML = `
     <style>
       :host { all: initial; }
+      :host {
+        --xrb-fg: ${isDark ? '#e7e9ea' : '#0f1419'};
+        --xrb-bg: ${isDark ? '#15202b' : '#ffffff'};
+        --xrb-border: ${isDark ? '#2f3336' : 'rgba(0,0,0,0.08)'};
+        --xrb-card-bg: ${isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)'};
+        --xrb-card-hover: ${isDark ? 'rgba(29,155,240,0.15)' : 'rgba(29,155,240,0.1)'};
+        --xrb-err-bg: ${isDark ? 'rgba(244,33,46,0.1)' : 'rgba(244,33,46,0.08)'};
+        --xrb-err-fg: ${isDark ? '#ff8593' : '#b81421'};
+        --xrb-accent: rgb(29,155,240);
+      }
       .wrap {
         font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        color: ${isDark ? '#e7e9ea' : '#0f1419'};
-        background: ${isDark ? '#15202b' : '#ffffff'};
-        border: 1px solid ${isDark ? '#2f3336' : 'rgba(0,0,0,0.08)'};
+        color: var(--xrb-fg);
+        background: var(--xrb-bg);
+        border: 1px solid var(--xrb-border);
         border-radius: 14px;
         box-shadow: 0 10px 40px rgba(0,0,0,0.2);
         padding: 10px;
         max-height: ${maxHeight}px;
         overflow: auto;
       }
-      .head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        padding: 4px 6px 8px;
-        font-weight: 600;
-      }
-      .head .meta {
-        font-weight: 400;
-        opacity: 0.7;
-        font-size: 12px;
-      }
+      .head { display:flex; align-items:center; justify-content:space-between; padding:4px 6px 8px; font-weight:600; }
+      .head .meta { font-weight:400; opacity:.7; font-size:12px; }
+      .list { outline: none; }
       .card {
         padding: 10px 12px;
         border-radius: 10px;
         margin-bottom: 8px;
-        background: ${isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)'};
+        background: var(--xrb-card-bg);
         cursor: pointer;
         white-space: pre-wrap;
         word-break: break-word;
-        transition: background 120ms ease, transform 100ms ease;
+        transition: background 120ms ease, transform 100ms ease, outline 80ms ease;
+        outline: 2px solid transparent;
+        outline-offset: -2px;
       }
-      .card:hover { background: ${isDark ? 'rgba(29,155,240,0.15)' : 'rgba(29,155,240,0.1)'}; }
-      .card:active { transform: scale(0.99); }
+      .card:hover { background: var(--xrb-card-hover); }
+      .card.active, .card:focus-visible { outline-color: var(--xrb-accent); background: var(--xrb-card-hover); }
       .card:last-child { margin-bottom: 0; }
-      .row {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        padding: 6px 2px 0;
-        font-size: 12px;
-        opacity: 0.7;
-      }
+      .row { display:flex; gap:8px; align-items:center; padding:6px 2px 0; font-size:12px; opacity:.85; flex-wrap: wrap; }
       .spinner {
-        width: 16px; height: 16px; border-radius: 50%;
-        border: 2px solid ${isDark ? '#2f3336' : 'rgba(0,0,0,0.1)'};
-        border-top-color: rgb(29,155,240);
-        animation: spin 0.8s linear infinite;
-        display: inline-block;
-        vertical-align: middle;
+        width:16px; height:16px; border-radius:50%;
+        border: 2px solid var(--xrb-border);
+        border-top-color: var(--xrb-accent);
+        animation: spin .8s linear infinite;
+        display:inline-block; vertical-align:middle;
       }
       @keyframes spin { to { transform: rotate(360deg); } }
-      .err {
-        padding: 10px 12px;
-        border-radius: 10px;
-        background: ${isDark ? 'rgba(244,33,46,0.1)' : 'rgba(244,33,46,0.08)'};
-        color: ${isDark ? '#ff8593' : '#b81421'};
-        font-size: 13px;
-      }
-      .err code {
-        font: 11px monospace;
-        opacity: 0.7;
-      }
-      .btn {
-        all: unset;
-        cursor: pointer;
-        padding: 6px 10px;
-        border-radius: 999px;
-        background: rgb(29,155,240);
-        color: white;
-        font-weight: 600;
-        font-size: 12px;
-      }
-      .btn:hover { background: rgb(26,140,216); }
-      .btn.ghost { background: transparent; color: inherit; border: 1px solid ${isDark ? '#2f3336' : 'rgba(0,0,0,0.1)'}; }
+      .err { padding:10px 12px; border-radius:10px; background: var(--xrb-err-bg); color: var(--xrb-err-fg); font-size:13px; }
+      .err details { margin-top:6px; }
+      .err code { font: 11px monospace; opacity:.7; }
+      .btn { all: unset; cursor:pointer; padding:6px 10px; border-radius:999px; background: var(--xrb-accent); color:white; font-weight:600; font-size:12px; }
+      .btn:hover { filter: brightness(1.05); }
+      .btn:focus-visible { outline: 2px solid var(--xrb-accent); outline-offset: 2px; }
+      .btn.ghost { background: transparent; color: inherit; border: 1px solid var(--xrb-border); }
     </style>
     <div class="wrap" role="dialog" aria-label="X Reply Booster suggestions">
       <div class="head"><span>✨ Suggestions</span><span class="meta" data-slot="meta"></span></div>
-      <div data-slot="body"></div>
+      <div class="list" data-slot="body"></div>
       <div class="row" data-slot="footer"></div>
     </div>
   `;
@@ -413,14 +396,11 @@ function createPopoverAt(anchor: HTMLElement): PopoverFullHandle {
     if (currentPopover === handle) currentPopover = null;
   };
   const onOutside = (e: Event) => {
-    if (!host.contains(e.target as Node) && !anchor.contains(e.target as Node)) {
-      close();
-    }
+    if (!host.contains(e.target as Node) && !anchor.contains(e.target as Node)) close();
   };
   const onEsc = (e: KeyboardEvent) => {
     if (e.key === 'Escape') close();
   };
-  // 스크롤/리사이즈 시 anchor 위치가 달라지므로, 복잡한 재포지셔닝 대신 조용히 닫음.
   const onViewportChange = () => close();
 
   setTimeout(() => {
@@ -433,44 +413,163 @@ function createPopoverAt(anchor: HTMLElement): PopoverFullHandle {
   const handle: PopoverFullHandle = {
     close,
     showLoading() {
-      body.innerHTML = `<div class="card"><span class="spinner"></span> &nbsp; Generating 3 variants…</div>`;
+      body.innerHTML = `<div class="card"><span class="spinner"></span> &nbsp; ${t('popover_loading')}</div>`;
       meta.textContent = '';
       footer.textContent = '';
     },
-    showError(msg: string, code?: string) {
-      body.textContent = '';
-      const div = document.createElement('div');
-      div.className = 'err';
-      div.textContent = msg;
-      if (code) {
-        const c = document.createElement('div');
-        const codeEl = document.createElement('code');
-        codeEl.textContent = code;
-        c.appendChild(codeEl);
-        div.appendChild(c);
-      }
-      body.appendChild(div);
-      const footerBtn = document.createElement('button');
-      footerBtn.className = 'btn ghost';
-      footerBtn.textContent = 'Open Options';
-      footerBtn.addEventListener('click', () => {
-        chrome.runtime.openOptionsPage?.();
-      });
-      footer.replaceChildren(footerBtn);
+    showError(err) {
+      renderError({ body, footer, meta, err });
     },
     showSuggestions(items, remaining, onPick) {
-      body.textContent = '';
-      for (const text of items) {
-        const card = document.createElement('div');
-        card.className = 'card';
-        card.textContent = text;
-        card.addEventListener('click', () => onPick(text));
-        body.appendChild(card);
-      }
-      meta.textContent =
-        remaining === null ? 'Unlimited · Thanks for the upgrade 💙' : `${remaining} free left today`;
-      footer.textContent = 'Click a card to insert';
+      renderSuggestions({ body, footer, meta, items, remaining, onPick });
     },
   };
   return handle;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 렌더링 헬퍼 (createPopoverAt 내부 분기 로직 추출)
+// ──────────────────────────────────────────────────────────────────────────
+
+function renderError({
+  body,
+  footer,
+  meta,
+  err,
+}: {
+  body: HTMLElement;
+  footer: HTMLElement;
+  meta: HTMLElement;
+  err: ErrorInfo;
+}) {
+  body.textContent = '';
+  meta.textContent = '';
+  const div = document.createElement('div');
+  div.className = 'err';
+  const head = document.createElement('div');
+  head.textContent = err.message;
+  div.appendChild(head);
+  if (err.details) {
+    const d = document.createElement('details');
+    const s = document.createElement('summary');
+    s.textContent = 'Details';
+    const codeEl = document.createElement('code');
+    codeEl.textContent = err.details;
+    d.appendChild(s);
+    d.appendChild(codeEl);
+    div.appendChild(d);
+  }
+  body.appendChild(div);
+
+  // 에러 코드별 버튼 분기 — 유저를 다음 action에 가장 가까운 경로로 보냄.
+  const buttons: HTMLElement[] = [];
+  if (err.code === 'QUOTA_EXCEEDED') {
+    buttons.push(
+      btn(t('btn_upgrade'), 'primary', () => {
+        chrome.runtime.openOptionsPage?.();
+      }),
+    );
+  } else if (err.code === 'API_KEY_MISSING' || err.providerCode === 'invalid_key') {
+    buttons.push(
+      btn(t('btn_add_key'), 'primary', () => {
+        chrome.runtime.openOptionsPage?.();
+      }),
+    );
+  } else if (err.code === 'PERSONA_MISSING') {
+    buttons.push(
+      btn(t('btn_create_persona'), 'primary', () => {
+        chrome.runtime.openOptionsPage?.();
+      }),
+    );
+  }
+  if (err.onRetry) {
+    buttons.push(btn(t('btn_retry'), 'ghost', () => err.onRetry?.()));
+  }
+  buttons.push(
+    btn(t('btn_open_options'), 'ghost', () => {
+      chrome.runtime.openOptionsPage?.();
+    }),
+  );
+  footer.replaceChildren(...buttons);
+}
+
+function btn(label: string, variant: 'primary' | 'ghost', onClick: () => void): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.className = variant === 'primary' ? 'btn' : 'btn ghost';
+  b.type = 'button';
+  b.textContent = label;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+function renderSuggestions({
+  body,
+  footer,
+  meta,
+  items,
+  remaining,
+  onPick,
+}: {
+  body: HTMLElement;
+  footer: HTMLElement;
+  meta: HTMLElement;
+  items: string[];
+  remaining: number | null;
+  onPick: (text: string) => void;
+}) {
+  body.textContent = '';
+  body.setAttribute('role', 'listbox');
+  body.setAttribute('tabindex', '-1');
+
+  const cards: HTMLElement[] = items.map((text, idx) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.setAttribute('role', 'option');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('aria-selected', idx === 0 ? 'true' : 'false');
+    card.textContent = text;
+    card.addEventListener('click', () => onPick(text));
+    return card;
+  });
+
+  let activeIdx = 0;
+  const setActive = (idx: number) => {
+    activeIdx = (idx + cards.length) % cards.length;
+    cards.forEach((c, i) => {
+      const selected = i === activeIdx;
+      c.classList.toggle('active', selected);
+      c.setAttribute('aria-selected', String(selected));
+    });
+    cards[activeIdx]?.focus();
+  };
+
+  cards.forEach((card, idx) => {
+    card.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        onPick(items[idx]!);
+      } else if (e.key === 'ArrowDown' || (e.key === 'Tab' && !e.shiftKey)) {
+        e.preventDefault();
+        setActive(idx + 1);
+      } else if (e.key === 'ArrowUp' || (e.key === 'Tab' && e.shiftKey)) {
+        e.preventDefault();
+        setActive(idx - 1);
+      }
+    });
+  });
+
+  for (const c of cards) body.appendChild(c);
+
+  // 팝오버 열리자마자 첫 카드에 focus — 키보드만 쓰는 유저도 즉시 선택 가능.
+  queueMicrotask(() => cards[0]?.focus());
+
+  // FOMO / 가치 전달 카피 분기.
+  meta.textContent =
+    remaining === null
+      ? t('popover_unlimited')
+      : remaining <= 0
+        ? t('popover_last_free')
+        : t('popover_free_left', { n: remaining });
+
+  footer.textContent = t('popover_click_hint');
 }

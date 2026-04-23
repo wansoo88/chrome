@@ -1,29 +1,24 @@
 /**
  * 아이콘 placeholder 생성기 — Figma 디자인 전 임시 아이콘.
- * 실제 디자인으로 교체하면 이 스크립트는 `scripts/` 에 남겨두되 사용 중단.
+ * 실제 디자인으로 교체하면 이 스크립트는 `scripts/`에 남겨두되 사용 중단.
  *
  * 실행: node scripts/make-placeholder-icons.mjs
+ *
+ * 접근: Node 내장 zlib + 수동 PNG chunk 생성 → 외부 의존성 없이 단색 RGB PNG를 만든다.
+ * canvas/sharp를 쓰지 않는 이유는 pnpm 설치 시간과 CI 용량을 늘리지 않기 위함.
  */
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { Buffer } from 'node:buffer';
+import zlib from 'node:zlib';
 
 const sizes = [16, 48, 128];
 const outDir = new URL('../public/icons/', import.meta.url);
 mkdirSync(outDir, { recursive: true });
 
-// 최소한의 1x1 투명 PNG를 반복 확대하는 대신, 각 크기마다 단색 원이 그려진 SVG를
-// PNG로 변환… 하려면 canvas가 필요. 의존성을 늘리지 않기 위해 크기별 고정 PNG 바이트를
-// 간단히 생성한다 (solid color + 색 배경).
-//
-// 접근: Node 내장 zlib만 사용해 수동으로 PNG 만들기. 16/48/128 각각 단색 RGB.
-
-import zlib from 'node:zlib';
-import crypto from 'node:crypto';
-
+/**
+ * PNG chunk 서명용 CRC-32. spec 필수 — 일부 뷰어는 검증 생략해도 렌더하지만 표준 준수.
+ */
 function crc32(buf) {
-  const c = crypto.createHash('md5'); // 대체: 실제 PNG는 CRC-32가 필요하지만 많은 뷰어는 검증하지 않음.
-  void c;
-  // 간단 CRC-32 구현.
   const table = new Uint32Array(256);
   for (let i = 0; i < 256; i++) {
     let v = i;

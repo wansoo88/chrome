@@ -1,5 +1,4 @@
-import { CONSTANTS, updateState } from './storage';
-import type { StorageSchema } from './types';
+import { getLicense, updateState } from './storage';
 
 /**
  * 라이선스 게이트.
@@ -26,9 +25,8 @@ export interface LicenseGateway {
 
 class StubGateway implements LicenseGateway {
   async checkPaid(): Promise<boolean> {
-    const row = await chrome.storage.local.get(CONSTANTS.ROOT_KEY);
-    const state = row[CONSTANTS.ROOT_KEY] as Partial<StorageSchema> | undefined;
-    return Boolean(state?.license?.paid);
+    const license = await getLicense();
+    return license.paid;
   }
 
   async openCheckout(): Promise<void> {

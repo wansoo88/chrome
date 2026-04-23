@@ -56,8 +56,10 @@ function defaultState(): StorageSchema {
 }
 
 /**
- * 저장본 병합 — 구버전/누락 필드를 기본값으로 채움.
- * 자정 리셋은 반영하지 않음 (읽기 전용; ensureUsageFresh 참조).
+ * 저장본 병합 — 구버전/누락 필드를 기본값으로 채움. 자정 리셋은 반영하지 않음(ensureUsageFresh).
+ *
+ * TODO(schema v2+): raw.version < SCHEMA_VERSION일 때 migrate(raw, from, to)를 여기서 분기.
+ * 현재는 v1뿐이라 단순 병합. 스키마를 바꾸는 시점에 이 지점이 단일 진입점이 되어야 한다.
  */
 function mergeState(raw: Partial<StorageSchema>): StorageSchema {
   return {
@@ -123,6 +125,14 @@ export async function setKeyConfig(cfg: KeyConfig | null): Promise<void> {
 export async function getKeyConfig(): Promise<KeyConfig | null> {
   const s = await getState();
   return s.keyConfig;
+}
+
+/**
+ * 라이선스 셀렉터 — storage 내부 구조를 외부 레이어(license.ts)에 누설하지 않기 위해 제공.
+ */
+export async function getLicense(): Promise<StorageSchema['license']> {
+  const s = await getState();
+  return s.license;
 }
 
 export async function savePersona(p: Persona): Promise<void> {
