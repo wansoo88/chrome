@@ -51,10 +51,6 @@ export default defineManifest({
 
   permissions: ['storage'],
 
-  web_accessible_resources: [
-    {
-      resources: ['icons/*.png'],
-      matches: ['https://x.com/*', 'https://twitter.com/*'],
-    },
-  ],
+  // chrome.runtime.sendMessage의 Promise 시그니처는 Chrome 99+부터 기본 지원.
+  minimum_chrome_version: '99',
 });

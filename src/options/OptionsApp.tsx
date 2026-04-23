@@ -16,27 +16,44 @@ import type {
 import { defaultModelFor } from '@/background/ai';
 import { devSetPaid, licenseGateway } from '@/shared/license';
 import { uid } from '@/shared/id';
+import type { ServerMsg, VerifyKeyRequest } from '@/shared/messages';
+
+/**
+ * Options 페이지 루트.
+ *
+ * 설계 주의:
+ * - Provider는 OpenAI, OpenRouter만 MVP에서 노출. Anthropic 직접 호출은 CORS 관련
+ *   `anthropic-dangerous-direct-browser-access` 헤더가 필요해 CWS 심사 리스크 → Claude 모델은
+ *   OpenRouter 경유를 권장.
+ * - prompt()/confirm() 네이티브 다이얼로그 대신 자체 modal 사용 (CWS 품질 신호).
+ */
 
 const PROVIDER_INFO: Record<
   Provider,
-  { label: string; docUrl: string; modelHint: string }
+  { label: string; docUrl: string; modelHint: string; hideFromUi?: boolean }
 > = {
   openai: {
     label: 'OpenAI',
     docUrl: 'https://platform.openai.com/api-keys',
     modelHint: 'gpt-4o-mini (default) · gpt-4o · gpt-5-mini',
   },
-  anthropic: {
-    label: 'Anthropic',
-    docUrl: 'https://console.anthropic.com/settings/keys',
-    modelHint: 'claude-3-5-haiku-latest (default) · claude-sonnet-4-5',
-  },
   openrouter: {
     label: 'OpenRouter',
     docUrl: 'https://openrouter.ai/keys',
-    modelHint: 'openai/gpt-4o-mini (default) · anthropic/claude-3.5-haiku',
+    modelHint:
+      'openai/gpt-4o-mini (default) · anthropic/claude-3.5-haiku · many more',
+  },
+  anthropic: {
+    label: 'Anthropic (advanced)',
+    docUrl: 'https://console.anthropic.com/settings/keys',
+    modelHint: 'claude-3-5-haiku-latest · may require CORS override',
+    hideFromUi: true,
   },
 };
+
+const UI_PROVIDERS: Provider[] = (
+  Object.keys(PROVIDER_INFO) as Provider[]
+).filter((p) => !PROVIDER_INFO[p].hideFromUi);
 
 export function OptionsApp() {
   const [state, setState] = useState<StorageSchema | null>(null);
@@ -91,23 +108,18 @@ export function OptionsApp() {
 // ──────────────────────────────────────────────────────────────────────────
 
 function KeySection({ current }: { current: KeyConfig | null }) {
-  const [provider, setProvider] = useState<Provider>(current?.provider ?? 'openai');
+  const initialProvider: Provider =
+    current && UI_PROVIDERS.includes(current.provider) ? current.provider : 'openai';
+  const [provider, setProvider] = useState<Provider>(initialProvider);
   const [apiKey, setApiKey] = useState<string>(current?.apiKey ?? '');
   const [model, setModel] = useState<string>(current?.model ?? defaultModelFor(provider));
   const [verifying, setVerifying] = useState(false);
   const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
-  // provider 전환 시 모델 힌트 자동 갱신.
+  // provider 전환 시 모델이 비어있거나 다른 제공자의 기본값이면 새 기본값으로 교체.
   useEffect(() => {
-    setModel((prev) => {
-      const defaults = Object.values(PROVIDER_INFO).map((_, i) => {
-        const p: Provider = (['openai', 'anthropic', 'openrouter'] as const)[i]!;
-        return defaultModelFor(p);
-      });
-      // 이전 값이 다른 provider의 기본 모델이라면 교체.
-      if (!prev || defaults.includes(prev)) return defaultModelFor(provider);
-      return prev;
-    });
+    const allDefaults = UI_PROVIDERS.map(defaultModelFor);
+    setModel((prev) => (!prev || allDefaults.includes(prev) ? defaultModelFor(provider) : prev));
   }, [provider]);
 
   const info = PROVIDER_INFO[provider];
@@ -122,15 +134,15 @@ function KeySection({ current }: { current: KeyConfig | null }) {
       lastVerifiedAt: null,
     };
     try {
-      const res = (await chrome.runtime.sendMessage({ kind: 'verifyKey', cfg })) as {
-        ok: boolean;
-        error?: string;
-      };
-      if (res?.ok) {
+      const req: VerifyKeyRequest = { kind: 'verifyKey', cfg };
+      const res = (await chrome.runtime.sendMessage(req)) as ServerMsg | undefined;
+      if (res && res.ok && res.kind === 'verifyKeyOk') {
         await setKeyConfig({ ...cfg, lastVerifiedAt: Date.now() });
         setMsg({ kind: 'ok', text: 'Verified and saved. You are good to go.' });
+      } else if (res && res.ok === false) {
+        setMsg({ kind: 'err', text: res.message });
       } else {
-        setMsg({ kind: 'err', text: res?.error ?? 'Verification failed.' });
+        setMsg({ kind: 'err', text: 'Unexpected response from background.' });
       }
     } catch (e) {
       setMsg({ kind: 'err', text: (e as Error).message });
@@ -161,7 +173,7 @@ function KeySection({ current }: { current: KeyConfig | null }) {
       <div className="field">
         <label>Provider</label>
         <div className="chips">
-          {(Object.keys(PROVIDER_INFO) as Provider[]).map((p) => (
+          {UI_PROVIDERS.map((p) => (
             <button
               type="button"
               key={p}
@@ -245,7 +257,7 @@ function KeySection({ current }: { current: KeyConfig | null }) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Persona section
+// Persona section (자체 modal — 네이티브 prompt/confirm 대신)
 // ──────────────────────────────────────────────────────────────────────────
 
 function PersonaSection({
@@ -256,18 +268,20 @@ function PersonaSection({
   activeId: string | null;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [naming, setNaming] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<Persona | null>(null);
 
   const editing = useMemo(
     () => (editingId ? personas.find((p) => p.id === editingId) : null),
     [editingId, personas],
   );
 
-  async function onCreate() {
-    const name = prompt('New persona name?');
-    if (!name) return;
+  async function onCreate(name: string) {
+    const trimmed = name.trim().slice(0, 60);
+    if (!trimmed) return;
     const p: Persona = {
       id: uid('p'),
-      name: name.trim().slice(0, 60),
+      name: trimmed,
       toneDescription: '',
       examples: [],
       createdAt: Date.now(),
@@ -300,12 +314,7 @@ function PersonaSection({
               <button
                 type="button"
                 className="small-btn"
-                onClick={async () => {
-                  if (confirm(`Delete persona "${p.name}"?`)) {
-                    await deletePersona(p.id);
-                    if (editingId === p.id) setEditingId(null);
-                  }
-                }}
+                onClick={() => setConfirmDelete(p)}
               >
                 Delete
               </button>
@@ -318,7 +327,7 @@ function PersonaSection({
         <button
           type="button"
           className="btn primary"
-          onClick={() => void onCreate()}
+          onClick={() => setNaming(true)}
           disabled={personas.length >= 10}
           title={personas.length >= 10 ? 'Limit: 10 personas' : ''}
         >
@@ -332,6 +341,36 @@ function PersonaSection({
           <div className="divider" />
           <PersonaEditor key={editing.id} persona={editing} onClose={() => setEditingId(null)} />
         </>
+      )}
+
+      {naming && (
+        <PromptModal
+          title="New persona"
+          label="Name"
+          placeholder="e.g. Builder Dan"
+          maxLength={60}
+          onCancel={() => setNaming(false)}
+          onSubmit={async (v) => {
+            setNaming(false);
+            await onCreate(v);
+          }}
+        />
+      )}
+
+      {confirmDelete && (
+        <ConfirmModal
+          title={`Delete "${confirmDelete.name}"?`}
+          description="This will remove the persona and its examples. Cannot be undone."
+          confirmLabel="Delete"
+          destructive
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={async () => {
+            const target = confirmDelete;
+            setConfirmDelete(null);
+            await deletePersona(target.id);
+            if (editingId === target.id) setEditingId(null);
+          }}
+        />
       )}
     </div>
   );
@@ -530,5 +569,135 @@ function LicenseSection({ paid }: { paid: boolean }) {
         </div>
       )}
     </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 자체 modal — 네이티브 prompt/confirm 대신 사용. Chrome 확장 심사 품질 신호.
+// ──────────────────────────────────────────────────────────────────────────
+
+function ModalShell({
+  title,
+  children,
+  onClose,
+}: {
+  title: string;
+  children: React.ReactNode;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onEsc);
+    return () => document.removeEventListener('keydown', onEsc);
+  }, [onClose]);
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(0,0,0,0.45)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000,
+      }}
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-label={title}
+        className="card"
+        style={{ width: 'min(420px, 92vw)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 10 }}>{title}</div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function PromptModal({
+  title,
+  label,
+  placeholder,
+  maxLength,
+  onSubmit,
+  onCancel,
+}: {
+  title: string;
+  label: string;
+  placeholder?: string;
+  maxLength?: number;
+  onSubmit: (value: string) => void | Promise<void>;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState('');
+  return (
+    <ModalShell title={title} onClose={onCancel}>
+      <div className="field">
+        <label>{label}</label>
+        <input
+          type="text"
+          autoFocus
+          value={value}
+          placeholder={placeholder}
+          maxLength={maxLength}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && value.trim()) void onSubmit(value);
+          }}
+        />
+      </div>
+      <div className="row" style={{ justifyContent: 'flex-end' }}>
+        <button type="button" className="btn" onClick={onCancel}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="btn primary"
+          disabled={!value.trim()}
+          onClick={() => void onSubmit(value)}
+        >
+          Create
+        </button>
+      </div>
+    </ModalShell>
+  );
+}
+
+function ConfirmModal({
+  title,
+  description,
+  confirmLabel = 'Confirm',
+  destructive = false,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  description?: string;
+  confirmLabel?: string;
+  destructive?: boolean;
+  onConfirm: () => void | Promise<void>;
+  onCancel: () => void;
+}) {
+  return (
+    <ModalShell title={title} onClose={onCancel}>
+      {description && <div className="muted" style={{ marginBottom: 14 }}>{description}</div>}
+      <div className="row" style={{ justifyContent: 'flex-end' }}>
+        <button type="button" className="btn" onClick={onCancel}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className={destructive ? 'btn danger' : 'btn primary'}
+          onClick={() => void onConfirm()}
+        >
+          {confirmLabel}
+        </button>
+      </div>
+    </ModalShell>
   );
 }

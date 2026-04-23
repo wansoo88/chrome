@@ -1,11 +1,12 @@
-import type { GenerateMode } from './types';
+import type { GenerateMode, KeyConfig } from './types';
 
 /**
- * Content script ↔ Background service worker 메시지 프로토콜.
+ * Content script / Popup / Options ↔ Background service worker 메시지 프로토콜.
  *
  * 원칙:
- * - 키(apiKey)는 절대 이 경로로 전송되지 않음 — background가 자체 storage에서 직접 읽음.
- * - 에러는 code + human message로 분리 → 다국어 UI 가능.
+ * - 키(apiKey)는 생성 요청에는 절대 포함되지 않음 — background가 자체 storage에서 읽음.
+ *   verifyKey만 예외: 사용자가 "검증" 버튼을 눌렀을 때 임시 cfg를 전달.
+ * - 모든 응답은 discriminated union으로 타입 좁힘 단순화.
  */
 
 export interface GenerateRequest {
@@ -24,7 +25,16 @@ export interface GetOverviewRequest {
   kind: 'getOverview';
 }
 
-export type ClientMsg = GenerateRequest | PingRequest | GetOverviewRequest;
+export interface VerifyKeyRequest {
+  kind: 'verifyKey';
+  cfg: KeyConfig;
+}
+
+export type ClientMsg =
+  | GenerateRequest
+  | PingRequest
+  | GetOverviewRequest
+  | VerifyKeyRequest;
 
 export type ErrorCode =
   | 'API_KEY_MISSING'
@@ -35,12 +45,14 @@ export type ErrorCode =
   | 'UNKNOWN';
 
 export interface GenerateOk {
+  kind: 'generateOk';
   ok: true;
   suggestions: string[];
-  remainingToday: number | null; // paid일 때 null.
+  remainingToday: number | null; // paid면 null.
 }
 
 export interface Overview {
+  kind: 'overview';
   ok: true;
   hasKey: boolean;
   paid: boolean;
@@ -51,18 +63,25 @@ export interface Overview {
 }
 
 export interface Pong {
+  kind: 'pong';
   ok: true;
   version: string;
 }
 
+export interface VerifyKeyOk {
+  kind: 'verifyKeyOk';
+  ok: true;
+}
+
 export interface ServerErr {
+  kind: 'error';
   ok: false;
   code: ErrorCode;
   message: string;
 }
 
-export type ServerMsg = GenerateOk | Overview | Pong | ServerErr;
+export type ServerMsg = GenerateOk | Overview | Pong | VerifyKeyOk | ServerErr;
 
 export function asServerErr(code: ErrorCode, message: string): ServerErr {
-  return { ok: false, code, message };
+  return { kind: 'error', ok: false, code, message };
 }

@@ -11,9 +11,11 @@ import type {
  * chrome.storage.local 단일-진입 래퍼.
  *
  * 설계:
- * - 모든 키를 단일 "xrb.state" 루트 아래 보관 → atomic read/write.
- * - 초기화(get + 기본값 주입)는 getState()에서 통합.
- * - 소비자는 getState/updateState만 사용 → 필드별 오프셋 오차 제거.
+ * - 모든 상태를 단일 "xrb.state" 루트 아래 보관 → 한 번의 read/write로 원자적.
+ * - getState는 read-only — 자정 리셋 판정/쓰기는 ensureUsageFresh에서 별도로 수행.
+ *   (여러 UI 컨텍스트가 동시에 열려 있을 때 읽기만으로 쓰기 연쇄가 터지는 걸 방지)
+ * - updateState는 background 내부에서만 써야 이상적이지만, Options/Popup에서 쓰기도
+ *   허용 (유저 조작 빈도가 낮고 한 번에 하나의 UI만 활성).
  */
 
 const ROOT_KEY = 'xrb.state';
@@ -30,8 +32,6 @@ const DEFAULT_LICENSE: License = {
   purchasedAt: null,
 };
 
-const DEFAULT_KEY_CONFIG: KeyConfig | null = null;
-
 function todayIso(): string {
   const d = new Date();
   const y = d.getFullYear();
@@ -47,7 +47,7 @@ function defaultUsage(): UsageDay {
 function defaultState(): StorageSchema {
   return {
     version: SCHEMA_VERSION,
-    keyConfig: DEFAULT_KEY_CONFIG,
+    keyConfig: null,
     personas: [],
     settings: { ...DEFAULT_SETTINGS },
     license: { ...DEFAULT_LICENSE },
@@ -55,18 +55,14 @@ function defaultState(): StorageSchema {
   };
 }
 
-export async function getState(): Promise<StorageSchema> {
-  const row = await chrome.storage.local.get(ROOT_KEY);
-  const raw = row[ROOT_KEY] as Partial<StorageSchema> | undefined;
-  if (!raw) {
-    const fresh = defaultState();
-    await chrome.storage.local.set({ [ROOT_KEY]: fresh });
-    return fresh;
-  }
-  // 안전한 병합 — 저장본이 구버전이면 기본값으로 채움.
-  const merged: StorageSchema = {
+/**
+ * 저장본 병합 — 구버전/누락 필드를 기본값으로 채움.
+ * 자정 리셋은 반영하지 않음 (읽기 전용; ensureUsageFresh 참조).
+ */
+function mergeState(raw: Partial<StorageSchema>): StorageSchema {
+  return {
     version: raw.version ?? SCHEMA_VERSION,
-    keyConfig: raw.keyConfig ?? DEFAULT_KEY_CONFIG,
+    keyConfig: raw.keyConfig ?? null,
     personas: Array.isArray(raw.personas) ? raw.personas : [],
     settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) },
     license: { ...DEFAULT_LICENSE, ...(raw.license ?? {}) },
@@ -75,14 +71,38 @@ export async function getState(): Promise<StorageSchema> {
         ? raw.usage
         : defaultUsage(),
   };
-  // 자정 넘김 리셋.
-  if (merged.usage.isoDate !== todayIso()) {
+}
+
+export async function getState(): Promise<StorageSchema> {
+  const row = await chrome.storage.local.get(ROOT_KEY);
+  const raw = row[ROOT_KEY] as Partial<StorageSchema> | undefined;
+  if (!raw) return defaultState();
+  return mergeState(raw);
+}
+
+/**
+ * 오늘 날짜와 다르면 usage를 초기화. write는 실제로 바뀐 경우에만.
+ * background에서 필요한 시점(generate 처리 직전)에 호출.
+ */
+export async function ensureUsageFresh(): Promise<StorageSchema> {
+  const row = await chrome.storage.local.get(ROOT_KEY);
+  const raw = row[ROOT_KEY] as Partial<StorageSchema> | undefined;
+  const merged = raw ? mergeState(raw) : defaultState();
+  const iso = todayIso();
+  if (merged.usage.isoDate !== iso) {
     merged.usage = defaultUsage();
+    await chrome.storage.local.set({ [ROOT_KEY]: merged });
+  } else if (!raw) {
+    // 빈 저장소에 기본값을 쓴 적이 없다면 최초 1회 물질화.
     await chrome.storage.local.set({ [ROOT_KEY]: merged });
   }
   return merged;
 }
 
+/**
+ * read-modify-write. 두 호출이 동시에 들어오면 마지막 승자가 이김 → 가능한 한 background
+ * 단일 컨텍스트로 수렴시키는 게 바람직. UI 쓰기는 결정성이 낮은 설정/퍼소나 CRUD로 제한.
+ */
 export async function updateState(
   mutator: (s: StorageSchema) => StorageSchema | void,
 ): Promise<StorageSchema> {
@@ -129,11 +149,12 @@ export async function setActivePersona(id: string | null): Promise<void> {
   });
 }
 
+/**
+ * usage.count += 1. ensureUsageFresh와 쌍으로 사용. 호출 측(background)이 직렬화 보장.
+ */
 export async function incrementUsage(): Promise<UsageDay> {
   const next = await updateState((s) => {
-    if (s.usage.isoDate !== todayIso()) {
-      s.usage = defaultUsage();
-    }
+    if (s.usage.isoDate !== todayIso()) s.usage = defaultUsage();
     s.usage.count += 1;
   });
   return next.usage;
@@ -155,7 +176,6 @@ export function onStateChanged(
   return () => chrome.storage.onChanged.removeListener(handler);
 }
 
-// 파일 상단 상수 노출 — 다른 모듈(e.g. 온보딩)에서 기본 한도 참조.
 export const CONSTANTS = {
   SCHEMA_VERSION,
   ROOT_KEY,

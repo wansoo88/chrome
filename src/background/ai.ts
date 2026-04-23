@@ -85,14 +85,16 @@ async function callAnthropic({ cfg, prompt, signal }: GenerateOpts): Promise<str
 }
 
 async function callOpenRouter({ cfg, prompt, signal }: GenerateOpts): Promise<string[]> {
+  // OpenRouter는 호출 집계/크레딧 할당을 위해 HTTP-Referer와 X-Title을 권장.
+  // Referer는 사용자 확장 URL 자체로 — 개발자 식별자를 외부에 노출하지 않음.
+  const referer = chrome.runtime.getURL('/');
   const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     signal,
     headers: {
       Authorization: `Bearer ${cfg.apiKey}`,
       'Content-Type': 'application/json',
-      // 무료 분석/크레딧 할당을 위해 OpenRouter가 HTTP-Referer와 X-Title을 권장.
-      'HTTP-Referer': 'https://github.com/wansoo88/chrome',
+      'HTTP-Referer': referer,
       'X-Title': 'X Reply Booster',
     },
     body: JSON.stringify({
