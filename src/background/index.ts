@@ -5,7 +5,7 @@ import {
   getState,
   incrementUsage,
 } from '@/shared/storage';
-import { licenseGateway } from '@/shared/license';
+import { checkAndDowngradeExpiredTrial, licenseGateway } from '@/shared/license';
 import { asServerErr } from '@/shared/messages';
 import type {
   ClientMsg,
@@ -31,10 +31,29 @@ import { t } from '@/shared/i18n';
 
 const MANIFEST_VERSION = chrome.runtime.getManifest().version;
 
-// onInstalled — 최초 설치 시 options 페이지 열기 (온보딩).
+// onInstalled — 최초 설치 시 options 페이지 열기 (온보딩) + trial 만료 alarm 등록.
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   if (reason === 'install') {
     chrome.runtime.openOptionsPage().catch(() => void 0);
+  }
+  scheduleTrialExpiryCheck();
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  scheduleTrialExpiryCheck();
+});
+
+function scheduleTrialExpiryCheck(): void {
+  // 매시간 만료 검사. trial은 7일 = 168시간이라 충분히 즉각적.
+  chrome.alarms.create('xrb-trial-expiry', {
+    periodInMinutes: 60,
+    when: Date.now() + 60 * 1000,
+  });
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'xrb-trial-expiry') {
+    void checkAndDowngradeExpiredTrial();
   }
 });
 
@@ -122,7 +141,9 @@ chrome.runtime.onMessage.addListener(
 
 async function buildOverview(): Promise<Overview> {
   const state = await getState();
-  const paid = await licenseGateway.checkPaid();
+  // 만료된 trial은 자동 강등(다음 generate 호출에서 free로 인식되도록).
+  await checkAndDowngradeExpiredTrial();
+  const paid = await licenseGateway.isPro();
   return {
     kind: 'overview',
     ok: true,
@@ -152,7 +173,9 @@ async function handleGenerate(
     return asServerErr('PERSONA_MISSING', t('err_persona_missing'));
   }
 
-  const paid = await licenseGateway.checkPaid();
+  // 만료된 trial은 즉시 강등.
+  await checkAndDowngradeExpiredTrial();
+  const paid = await licenseGateway.isPro();
   if (!paid && state.usage.count >= state.settings.dailyFreeLimit) {
     return asServerErr(
       'QUOTA_EXCEEDED',

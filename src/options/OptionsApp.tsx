@@ -14,7 +14,8 @@ import type {
   StorageSchema,
 } from '@/shared/types';
 import { defaultModelFor } from '@/background/ai';
-import { devSetPaid, licenseGateway } from '@/shared/license';
+import { devSetTier, licenseGateway, trialMsRemaining } from '@/shared/license';
+import type { License } from '@/shared/types';
 import { uid } from '@/shared/id';
 import type { ServerMsg, VerifyKeyRequest } from '@/shared/messages';
 
@@ -93,7 +94,7 @@ export function OptionsApp() {
       <PreferencesSection state={state} />
 
       <h2>4. License</h2>
-      <LicenseSection paid={state.license.paid} />
+      <LicenseSection license={state.license} />
 
       <h2>Privacy</h2>
       <div className="card muted" style={{ fontSize: 13 }}>
@@ -670,61 +671,255 @@ function PreferencesSection({ state }: { state: StorageSchema }) {
 // License
 // ──────────────────────────────────────────────────────────────────────────
 
-function LicenseSection({ paid }: { paid: boolean }) {
+function LicenseSection({ license }: { license: License }) {
+  // trial 만료를 즉시 반영 (storage에 강등 저장은 background alarm이 하지만, UI는 시간 비교만으로 표시).
+  const trialActive =
+    license.tier === 'trial' &&
+    license.trialExpiresAt !== null &&
+    license.trialExpiresAt > Date.now();
+  const effectiveTier =
+    license.tier === 'trial' && !trialActive ? 'free' : license.tier;
+
   return (
     <div className="card">
-      {paid ? (
-        <div>
-          <div className="ok" style={{ fontWeight: 600 }}>Upgraded — thanks!</div>
-          <div className="muted" style={{ marginTop: 4 }}>
-            Unlimited generations · Up to 10 personas.
-          </div>
-          {import.meta.env.DEV && (
-            <div className="row" style={{ marginTop: 10 }}>
-              <button
-                type="button"
-                className="btn"
-                onClick={() => void devSetPaid(false)}
-                title="Dev only — revert to free for testing."
-              >
-                DEV: revert to free
-              </button>
-            </div>
-          )}
+      {effectiveTier === 'lifetime' && <LifetimeBlock startedAt={license.startedAt} />}
+      {effectiveTier === 'monthly' && <MonthlyBlock startedAt={license.startedAt} />}
+      {effectiveTier === 'trial' && (
+        <TrialActiveBlock msRemaining={trialMsRemaining(license)} email={license.trialEmail} />
+      )}
+      {effectiveTier === 'free' && <FreeBlock license={license} />}
+
+      {import.meta.env.DEV && (
+        <div className="row" style={{ marginTop: 14, paddingTop: 14, borderTop: '1px dashed var(--border)' }}>
+          <span className="muted" style={{ marginRight: 8 }}>DEV:</span>
+          <button type="button" className="small-btn" onClick={() => void devSetTier('free')}>
+            Free
+          </button>
+          <button type="button" className="small-btn" onClick={() => void devSetTier('trial', 7)}>
+            Trial 7d
+          </button>
+          <button type="button" className="small-btn" onClick={() => void devSetTier('monthly')}>
+            Monthly
+          </button>
+          <button type="button" className="small-btn" onClick={() => void devSetTier('lifetime')}>
+            Lifetime
+          </button>
         </div>
-      ) : (
-        <div>
-          <div style={{ fontWeight: 600, fontSize: 15 }}>Upgrade — $3.99 once, forever</div>
-          <ul className="muted" style={{ margin: '8px 0 0 18px', padding: 0 }}>
-            <li>Unlimited generations (free is 5/day)</li>
-            <li>Up to 10 personas (free is 1)</li>
-            <li>Thread hints for mid-compose suggestions</li>
-          </ul>
-          <div className="row" style={{ marginTop: 10 }}>
+      )}
+    </div>
+  );
+}
+
+function LifetimeBlock({ startedAt }: { startedAt: number | null }) {
+  return (
+    <div>
+      <div className="ok" style={{ fontWeight: 700, fontSize: 16 }}>Lifetime Pro — thanks!</div>
+      <div className="muted" style={{ marginTop: 4 }}>
+        Unlimited replies · 10 personas · Thread hints. Pay once. Forever.
+      </div>
+      {startedAt && (
+        <div className="hint" style={{ marginTop: 6 }}>
+          Purchased {new Date(startedAt).toLocaleDateString()}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MonthlyBlock({ startedAt }: { startedAt: number | null }) {
+  return (
+    <div>
+      <div className="ok" style={{ fontWeight: 700, fontSize: 16 }}>Pro Monthly — active</div>
+      <div className="muted" style={{ marginTop: 4 }}>
+        Unlimited replies · 10 personas · Thread hints. $3.99/month.
+      </div>
+      {startedAt && (
+        <div className="hint" style={{ marginTop: 6 }}>
+          Renewed {new Date(startedAt).toLocaleDateString()}. Manage subscription via the receipt
+          email from ExtensionPay.
+        </div>
+      )}
+      <div className="row" style={{ marginTop: 10 }}>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => void licenseGateway.openCheckout('lifetime')}
+        >
+          Switch to Lifetime ($19.99)
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TrialActiveBlock({ msRemaining, email }: { msRemaining: number; email: string | null }) {
+  const days = Math.floor(msRemaining / (24 * 3600 * 1000));
+  const hours = Math.floor((msRemaining % (24 * 3600 * 1000)) / (3600 * 1000));
+  return (
+    <div>
+      <div style={{ fontWeight: 700, fontSize: 16, color: 'var(--accent, #1d9bf0)' }}>
+        🎁 Pro Trial — active
+      </div>
+      <div className="muted" style={{ marginTop: 4 }}>
+        Unlimited replies · 10 personas · Thread hints.
+      </div>
+      <div style={{ marginTop: 8, fontSize: 13 }}>
+        <b>{days}d {hours}h remaining</b>
+        {email && <span className="muted"> · {email}</span>}
+      </div>
+      <div className="row" style={{ marginTop: 10 }}>
+        <button
+          type="button"
+          className="btn primary"
+          onClick={() => void licenseGateway.openCheckout('lifetime')}
+        >
+          Upgrade to Lifetime $19.99
+        </button>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => void licenseGateway.openCheckout('monthly')}
+        >
+          $3.99/mo
+        </button>
+      </div>
+      <div className="hint" style={{ marginTop: 8 }}>
+        After trial: auto-downgrade to Free Forever (5/day, 1 persona). No charge unless you upgrade.
+      </div>
+    </div>
+  );
+}
+
+function FreeBlock({ license }: { license: License }) {
+  const [email, setEmail] = useState('');
+  const [trialMsg, setTrialMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [starting, setStarting] = useState(false);
+
+  const trialUsedBefore = Boolean(license.trialEmail);
+
+  async function startTrial() {
+    setStarting(true);
+    setTrialMsg(null);
+    const r = await licenseGateway.startTrialWithEmail(email);
+    setStarting(false);
+    if (!r.ok) {
+      setTrialMsg({ ok: false, text: r.error ?? 'Failed to start trial.' });
+    } else {
+      setTrialMsg({ ok: true, text: '7-day Pro Trial started. Enjoy!' });
+      setEmail('');
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ fontWeight: 700, fontSize: 16 }}>Free Forever</div>
+      <div className="muted" style={{ marginTop: 4 }}>
+        5 replies/day · 1 persona. Upgrade to remove limits.
+      </div>
+
+      {/* 가격 비교 앵커 */}
+      <div
+        style={{
+          marginTop: 14,
+          padding: 10,
+          borderRadius: 8,
+          background: 'rgba(29, 155, 240, 0.06)',
+          border: '1px solid rgba(29, 155, 240, 0.15)',
+          fontSize: 13,
+        }}
+      >
+        💡 <b>TweetHunter</b> = $49/mo ($588/yr) · <b>Hypefury</b> = $19/mo · <b>This</b> ={' '}
+        <b style={{ color: 'var(--accent, #1d9bf0)' }}>$3.99/mo or $19.99 once</b>. Up to 30× less.
+      </div>
+
+      {/* Pro Trial 시작 */}
+      {!trialUsedBefore ? (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontWeight: 600, fontSize: 14 }}>🎁 Try Pro free for 7 days</div>
+          <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+            Unlimited replies · 10 personas · Thread hints. No charge after — auto-downgrade to free.
+          </div>
+          <div className="row" style={{ marginTop: 8, alignItems: 'stretch' }}>
+            <input
+              type="email"
+              autoComplete="email"
+              placeholder="your@email.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              style={{ flex: 1 }}
+            />
             <button
               type="button"
               className="btn primary"
-              onClick={() => void licenseGateway.openCheckout()}
+              onClick={() => void startTrial()}
+              disabled={!email.trim() || starting}
             >
-              Upgrade
+              {starting ? 'Starting…' : 'Start 7-day Trial'}
             </button>
-            {import.meta.env.DEV && (
-              <button
-                type="button"
-                className="btn"
-                onClick={() => void devSetPaid(true)}
-                title="Dev only — simulate paid state for testing."
-              >
-                DEV: mark paid
-              </button>
-            )}
           </div>
-          <div className="hint" style={{ marginTop: 8 }}>
-            Payments are processed by ExtensionPay (connected once the developer account is
-            registered).
+          {trialMsg && (
+            <div className={trialMsg.ok ? 'ok' : 'err'} style={{ marginTop: 6, fontSize: 12 }}>
+              {trialMsg.text}
+            </div>
+          )}
+          <div className="hint" style={{ marginTop: 6 }}>
+            Email is used by ExtensionPay to verify trial eligibility (one trial per email). It is
+            not added to any list.
           </div>
         </div>
+      ) : (
+        <div
+          className="muted"
+          style={{
+            marginTop: 14,
+            padding: 10,
+            borderRadius: 8,
+            background: 'rgba(0,0,0,0.03)',
+            fontSize: 12,
+          }}
+        >
+          Trial already used for <b>{license.trialEmail}</b>. To unlock Pro, upgrade below.
+        </div>
       )}
+
+      {/* Upgrade tier 선택 */}
+      <div style={{ marginTop: 16 }}>
+        <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>
+          Choose your plan
+        </div>
+        <div className="tier-grid">
+          <button
+            type="button"
+            className="tier-card"
+            onClick={() => void licenseGateway.openCheckout('monthly')}
+          >
+            <div className="tier-name">Monthly</div>
+            <div className="tier-price">
+              <b>$3.99</b>
+              <span className="muted">/mo</span>
+            </div>
+            <div className="tier-note muted">Cancel anytime</div>
+          </button>
+          <button
+            type="button"
+            className="tier-card recommended"
+            onClick={() => void licenseGateway.openCheckout('lifetime')}
+          >
+            <div className="tier-badge">★ Best value</div>
+            <div className="tier-name">Lifetime</div>
+            <div className="tier-price">
+              <b>$19.99</b>
+              <span className="muted"> once</span>
+            </div>
+            <div className="tier-note muted">Pay once. Own forever. ~5 mo of monthly.</div>
+          </button>
+        </div>
+      </div>
+
+      <div className="hint" style={{ marginTop: 12 }}>
+        Secure checkout by ExtensionPay (Stripe-backed). 7-day no-questions refund. Lifetime
+        license restores on any device when you log in with your purchase email.
+      </div>
     </div>
   );
 }

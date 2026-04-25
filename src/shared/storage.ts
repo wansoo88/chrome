@@ -19,7 +19,12 @@ import type {
  */
 
 const ROOT_KEY = 'xrb.state';
-const SCHEMA_VERSION = 1;
+/**
+ * v1: paid:bool · purchasedAt
+ * v2 (2026-04-25): 4-tier 결제 모델 도입. License를 tier·startedAt·trialExpiresAt·trialEmail로 확장.
+ *   migrate(): v1.paid===true → v2.tier='lifetime'; v1.paid===false → v2.tier='free'
+ */
+const SCHEMA_VERSION = 2;
 
 const DEFAULT_SETTINGS: Settings = {
   activePersonaId: null,
@@ -28,8 +33,10 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 const DEFAULT_LICENSE: License = {
-  paid: false,
-  purchasedAt: null,
+  tier: 'free',
+  startedAt: null,
+  trialExpiresAt: null,
+  trialEmail: null,
 };
 
 function todayIso(): string {
@@ -58,21 +65,53 @@ function defaultState(): StorageSchema {
 /**
  * 저장본 병합 — 구버전/누락 필드를 기본값으로 채움. 자정 리셋은 반영하지 않음(ensureUsageFresh).
  *
- * TODO(schema v2+): raw.version < SCHEMA_VERSION일 때 migrate(raw, from, to)를 여기서 분기.
- * 현재는 v1뿐이라 단순 병합. 스키마를 바꾸는 시점에 이 지점이 단일 진입점이 되어야 한다.
+ * Migration:
+ * - v1 → v2: paid:bool를 tier로 변환. paid===true → 'lifetime', paid===false → 'free'.
+ *   purchasedAt → startedAt. 새 trial 필드는 null.
  */
 function mergeState(raw: Partial<StorageSchema>): StorageSchema {
+  const rawLicense = (raw.license ?? {}) as Partial<License> & {
+    paid?: boolean;
+    purchasedAt?: number | null;
+  };
+  const license = migrateLicense(rawLicense, raw.version);
+
   return {
-    version: raw.version ?? SCHEMA_VERSION,
+    version: SCHEMA_VERSION,
     keyConfig: raw.keyConfig ?? null,
     personas: Array.isArray(raw.personas) ? raw.personas : [],
     settings: { ...DEFAULT_SETTINGS, ...(raw.settings ?? {}) },
-    license: { ...DEFAULT_LICENSE, ...(raw.license ?? {}) },
+    license,
     usage:
       raw.usage && typeof raw.usage.isoDate === 'string'
         ? raw.usage
         : defaultUsage(),
   };
+}
+
+/**
+ * v1 → v2 라이선스 마이그레이션. v2 이상이면 그대로 통과.
+ */
+function migrateLicense(
+  raw: Partial<License> & { paid?: boolean; purchasedAt?: number | null },
+  version: number | undefined,
+): License {
+  // v2 형식인 경우 (tier 필드 있음).
+  if (typeof raw.tier === 'string') {
+    return { ...DEFAULT_LICENSE, ...raw };
+  }
+  // v1 형식 (paid:bool).
+  if (typeof raw.paid === 'boolean') {
+    return {
+      tier: raw.paid ? 'lifetime' : 'free',
+      startedAt: raw.purchasedAt ?? null,
+      trialExpiresAt: null,
+      trialEmail: null,
+    };
+  }
+  // 알 수 없는 형식 또는 빈 값.
+  void version;
+  return { ...DEFAULT_LICENSE };
 }
 
 export async function getState(): Promise<StorageSchema> {

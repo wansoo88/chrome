@@ -12,7 +12,7 @@ export default defineManifest({
   name: 'X Reply Booster',
   version: pkg.version,
   description:
-    'Generate 3 in-your-voice replies & thread hints on X. Bring your own AI key. Pay once, no subscription.',
+    'Generate 3 in-your-voice replies on X. Free Forever 5/day, 7-day Pro Trial, $3.99/mo or $19.99 lifetime. BYOK.',
   default_locale: 'en',
 
   icons: {
@@ -49,7 +49,8 @@ export default defineManifest({
 
   host_permissions: ['https://x.com/*', 'https://twitter.com/*'],
 
-  permissions: ['storage'],
+  // alarms: 매시간 trial 만료 검사 (license.ts checkAndDowngradeExpiredTrial)
+  permissions: ['storage', 'alarms'],
 
   // chrome.runtime.sendMessage의 Promise 시그니처는 Chrome 99+부터 기본 지원.
   minimum_chrome_version: '99',

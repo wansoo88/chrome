@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { getState, onStateChanged, setActivePersona } from '@/shared/storage';
-import type { Persona, StorageSchema } from '@/shared/types';
-import { licenseGateway } from '@/shared/license';
+import type { LicenseTier, Persona, StorageSchema } from '@/shared/types';
+import { licenseGateway, trialMsRemaining } from '@/shared/license';
 
 /**
  * Popup은 유저가 "지금 얼마나 쓸 수 있는지 + 어디로 가야 하는지"를 1초 안에 판단하게 한다.
@@ -9,18 +9,22 @@ import { licenseGateway } from '@/shared/license';
  */
 export function PopupApp() {
   const [state, setState] = useState<StorageSchema | null>(null);
-  const [paid, setPaid] = useState<boolean>(false);
+  const [tier, setTier] = useState<LicenseTier>('free');
 
   useEffect(() => {
     let active = true;
     (async () => {
-      const [s, p] = await Promise.all([getState(), licenseGateway.checkPaid()]);
+      const [s, t] = await Promise.all([getState(), licenseGateway.currentTier()]);
       if (!active) return;
       setState(s);
-      setPaid(p);
+      setTier(t);
     })();
     const unsub = onStateChanged((next) => {
-      if (next) setState(next);
+      if (next) {
+        setState(next);
+        // tier도 즉시 재계산 (만료 trial 강등 반영).
+        void licenseGateway.currentTier().then(setTier);
+      }
     });
     return () => {
       active = false;
@@ -45,7 +49,10 @@ export function PopupApp() {
   const setupComplete = hasKey && hasPersona;
   const limit = state.settings.dailyFreeLimit;
   const remaining = Math.max(0, limit - state.usage.count);
-  const lowRemaining = !paid && remaining <= Math.max(1, Math.floor(limit * 0.2));
+  const isPro = tier === 'trial' || tier === 'monthly' || tier === 'lifetime';
+  const lowRemaining = !isPro && remaining <= Math.max(1, Math.floor(limit * 0.2));
+  const trialMs = trialMsRemaining(state.license);
+  const trialDays = Math.floor(trialMs / (24 * 3600 * 1000));
 
   const openX = () => {
     chrome.tabs.create({ url: 'https://x.com/home' }).catch(() => void 0);
@@ -58,7 +65,7 @@ export function PopupApp() {
           <span>✨</span>
           <span>X Reply Booster</span>
         </div>
-        {paid ? <span className="chip">PRO</span> : <span className="chip">Free</span>}
+        <TierChip tier={tier} trialDays={trialDays} />
       </div>
 
       <div className="divider" />
@@ -89,7 +96,7 @@ export function PopupApp() {
                 <span className="muted">Personas</span>
                 <b>{state.personas.length}</b>
               </div>
-              {paid ? (
+              {isPro ? (
                 <div className="stat">
                   <span className="muted">Today</span>
                   <b>∞</b>
@@ -105,7 +112,7 @@ export function PopupApp() {
             </div>
           </div>
 
-          {!paid && (
+          {!isPro && (
             <div className="row muted" style={{ marginTop: 8, fontSize: 11 }}>
               Free: {limit} replies/day · 1 active persona
             </div>
@@ -130,14 +137,39 @@ export function PopupApp() {
         </button>
       </div>
 
-      {!paid && setupComplete && (
+      {!isPro && setupComplete && (
         <div className="row" style={{ marginTop: 8 }}>
           <button
             type="button"
             className={`btn ${lowRemaining ? 'primary' : 'ghost'} grow`}
-            onClick={() => void licenseGateway.openCheckout()}
+            onClick={() => void licenseGateway.openCheckout('lifetime')}
           >
-            {lowRemaining ? `Running low · Upgrade $3.99` : `Upgrade $3.99 (unlimited)`}
+            {lowRemaining
+              ? `Running low · $19.99 unlimited`
+              : `Pro: $3.99/mo or $19.99 once`}
+          </button>
+        </div>
+      )}
+
+      {tier === 'trial' && (
+        <div
+          className="row"
+          style={{
+            marginTop: 8,
+            padding: 8,
+            borderRadius: 8,
+            background: 'rgba(29, 155, 240, 0.08)',
+            fontSize: 12,
+          }}
+        >
+          🎁 Trial: {trialDays}d remaining ·{' '}
+          <button
+            type="button"
+            className="btn ghost"
+            style={{ padding: '4px 10px', marginLeft: 'auto' }}
+            onClick={() => void licenseGateway.openCheckout('lifetime')}
+          >
+            Upgrade $19.99
           </button>
         </div>
       )}
@@ -151,6 +183,19 @@ export function PopupApp() {
       )}
     </div>
   );
+}
+
+function TierChip({ tier, trialDays }: { tier: LicenseTier; trialDays: number }) {
+  if (tier === 'lifetime') {
+    return <span className="chip" style={{ background: 'rgba(0,186,124,0.15)', color: '#00ba7c' }}>LIFETIME</span>;
+  }
+  if (tier === 'monthly') {
+    return <span className="chip" style={{ background: 'rgba(0,186,124,0.15)', color: '#00ba7c' }}>PRO · MONTHLY</span>;
+  }
+  if (tier === 'trial') {
+    return <span className="chip" style={{ background: 'rgba(29,155,240,0.15)' }}>TRIAL · {trialDays}d</span>;
+  }
+  return <span className="chip">Free</span>;
 }
 
 function SetupChecklist({ hasKey, hasPersona }: { hasKey: boolean; hasPersona: boolean }) {
