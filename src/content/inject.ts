@@ -150,6 +150,33 @@ interface PopoverHandle {
   close(): void;
 }
 
+/**
+ * SW 콜드스타트 대응. 5분 idle 후 첫 sendMessage가 "Receiving end does not exist"로 거절될 수 있음.
+ * 1회 자동 재시도 + 짧은 백오프 후 같은 요청 재전송. 두 번째도 실패면 상위 catch로 위임.
+ */
+async function sendMessageWithRetry<T = ServerMsg>(req: ClientMsg, maxAttempts = 2): Promise<T | undefined> {
+  let lastErr: unknown;
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const res = (await chrome.runtime.sendMessage(req)) as T | undefined;
+      // chrome.runtime.lastError 명시 검사 (Promise mode에서도 일부 케이스에서 채워짐).
+      if (chrome.runtime.lastError) {
+        throw new Error(chrome.runtime.lastError.message ?? 'runtime.lastError set');
+      }
+      if (res) return res;
+      // res가 undefined면 listener가 응답을 안 보낸 것 — 재시도 가치.
+      lastErr = new Error('Empty response from background');
+    } catch (e) {
+      lastErr = e;
+    }
+    // 재시도 전 짧은 백오프 (SW 콜드스타트 시간).
+    if (i < maxAttempts - 1) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('sendMessage failed');
+}
+
 async function openPopoverFor(textarea: HTMLElement, anchor: HTMLElement): Promise<void> {
   currentPopover?.close();
 
@@ -171,7 +198,7 @@ async function openPopoverFor(textarea: HTMLElement, anchor: HTMLElement): Promi
 
   let res: ServerMsg | undefined;
   try {
-    res = (await chrome.runtime.sendMessage(req)) as ServerMsg | undefined;
+    res = await sendMessageWithRetry(req);
   } catch (e) {
     ui.showError({ message: t('err_no_background'), details: (e as Error).message });
     return;
