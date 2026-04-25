@@ -1,8 +1,14 @@
 import type { ClientMsg, ReplyLength, ServerMsg } from '@/shared/messages';
-import { t } from '@/shared/i18n';
-import { getState } from '@/shared/storage';
+import { setLocale, t } from '@/shared/i18n';
+import { getState, onStateChanged } from '@/shared/storage';
 import type { Persona } from '@/shared/types';
 import { findComposeTextareas, findOriginalTweet } from './selectors';
+
+// content script 초기 locale 동기화. injectStart에서 호출되도록 모듈 스코프에서 시작.
+void getState().then((s) => setLocale(s.settings.languagePref));
+onStateChanged((next) => {
+  if (next) setLocale(next.settings.languagePref);
+});
 
 /**
  * X 컴포즈 영역 옆에 ✨ 버튼을 주입하고 클릭 시 팝오버로 3안을 제공.

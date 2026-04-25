@@ -19,7 +19,8 @@ import type {
   VerifyKeyOk,
 } from '@/shared/messages';
 import { generate, ProviderError, verifyKey } from './ai';
-import { t } from '@/shared/i18n';
+import { setLocale, t } from '@/shared/i18n';
+import { onStateChanged } from '@/shared/storage';
 
 /**
  * Service Worker 엔트리.
@@ -33,6 +34,13 @@ import { t } from '@/shared/i18n';
  */
 
 const MANIFEST_VERSION = chrome.runtime.getManifest().version;
+
+// i18n: 시작 시 locale 동기화 + storage 변경 감지하여 갱신.
+// languagePref는 AI 답변 언어 + UI 언어 동일 필드 (단순화 — 'auto'는 en으로 폴백).
+void getState().then((s) => setLocale(s.settings.languagePref));
+onStateChanged((next) => {
+  if (next) setLocale(next.settings.languagePref);
+});
 
 // onInstalled — 최초 설치 시 options 페이지 열기 (온보딩) + trial 만료 alarm 등록.
 chrome.runtime.onInstalled.addListener(({ reason }) => {
