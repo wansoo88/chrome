@@ -1,5 +1,7 @@
-import type { ClientMsg, ServerMsg } from '@/shared/messages';
+import type { ClientMsg, ReplyLength, ServerMsg } from '@/shared/messages';
 import { t } from '@/shared/i18n';
+import { getState } from '@/shared/storage';
+import type { Persona } from '@/shared/types';
 import { findComposeTextareas, findOriginalTweet } from './selectors';
 
 /**
@@ -184,59 +186,89 @@ async function openPopoverFor(textarea: HTMLElement, anchor: HTMLElement): Promi
   const original = findOriginalTweet(textarea);
   const mode: 'reply' | 'threadHint' = draft.length > 0 ? 'threadHint' : 'reply';
 
+  // 퍼소나 목록 + 활성 ID는 storage에서 직접 조회. content script도 storage 권한 있음.
+  let personas: Persona[] = [];
+  let activePersonaId: string | null = null;
+  try {
+    const s = await getState();
+    personas = s.personas;
+    activePersonaId = s.settings.activePersonaId;
+  } catch {
+    // storage 실패는 치명적이지 않음 — null로 진행 (background가 활성 퍼소나 결정).
+  }
+
+  // 팝오버 상태 (퍼소나·길이). 컨트롤 변경 시 자동 재생성.
+  let currentLength: ReplyLength = 'medium';
+  let currentPersonaId: string | null = activePersonaId;
+
   const ui = createPopoverAt(anchor);
   currentPopover = ui;
-  ui.showLoading();
 
-  const req: ClientMsg = {
-    kind: 'generate',
-    mode,
-    originalTweet: original,
-    draft: mode === 'threadHint' ? draft : null,
-    personaId: null,
+  ui.setControls({
+    personas,
+    activePersonaId: currentPersonaId,
+    length: currentLength,
+    onPersonaChange: (id) => {
+      currentPersonaId = id || null;
+      void runGenerate();
+    },
+    onLengthChange: (l) => {
+      currentLength = l;
+      void runGenerate();
+    },
+    onRegenerate: () => void runGenerate(),
+  });
+
+  const runGenerate = async () => {
+    ui.showLoading();
+    const req: ClientMsg = {
+      kind: 'generate',
+      mode,
+      originalTweet: original,
+      draft: mode === 'threadHint' ? draft : null,
+      personaId: currentPersonaId,
+      length: currentLength,
+    };
+    let res: ServerMsg | undefined;
+    try {
+      res = await sendMessageWithRetry(req);
+    } catch (e) {
+      ui.showError({ message: t('err_no_background'), details: (e as Error).message });
+      return;
+    }
+    if (!res) {
+      ui.showError({ message: t('err_no_background') });
+      return;
+    }
+    if (res.ok === false) {
+      ui.showError({
+        message: res.message,
+        details: res.details,
+        code: res.code,
+        providerCode: res.providerCode,
+        onRetry: () => void runGenerate(),
+      });
+      return;
+    }
+    if (res.kind === 'generateOk') {
+      const showReviewNudge =
+        (res.totalGenerated ?? 0) >= 3 && !res.reviewAsked;
+      ui.showSuggestions(
+        res.suggestions,
+        res.remainingToday,
+        (text) => {
+          insertIntoTextarea(textarea, text);
+          chrome.runtime.sendMessage({ kind: 'recordInsert' }).catch(() => void 0);
+          ui.close();
+        },
+        showReviewNudge,
+      );
+      return;
+    }
+    ui.showError({ message: t('err_unknown'), code: 'INVALID_RESPONSE' });
   };
 
-  let res: ServerMsg | undefined;
-  try {
-    res = await sendMessageWithRetry(req);
-  } catch (e) {
-    ui.showError({ message: t('err_no_background'), details: (e as Error).message });
-    return;
-  }
-  if (!res) {
-    ui.showError({ message: t('err_no_background') });
-    return;
-  }
-  if (res.ok === false) {
-    ui.showError({
-      message: res.message,
-      details: res.details,
-      code: res.code,
-      providerCode: res.providerCode,
-      onRetry: () => void openPopoverFor(textarea, anchor),
-    });
-    return;
-  }
-  if (res.kind === 'generateOk') {
-    // 리뷰 넛지 트리거: 삽입 3회 이상 + 아직 안 물어봤으면 카드 위에 1줄 표시 후 close 시 1회만.
-    const showReviewNudge =
-      (res.totalGenerated ?? 0) >= 3 && !res.reviewAsked;
-    ui.showSuggestions(
-      res.suggestions,
-      res.remainingToday,
-      (text) => {
-        insertIntoTextarea(textarea, text);
-        // 삽입 카운트 + 주간 stat 갱신 (백그라운드, 응답 무시).
-        chrome.runtime
-          .sendMessage({ kind: 'recordInsert' })
-          .catch(() => void 0);
-        ui.close();
-      },
-      showReviewNudge,
-    );
-    return;
-  }
-  ui.showError({ message: t('err_unknown'), code: 'INVALID_RESPONSE' });
+  await runGenerate();
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -290,6 +322,15 @@ interface ErrorInfo {
   onRetry?: () => void;
 }
 
+interface ControlsConfig {
+  personas: Persona[];
+  activePersonaId: string | null;
+  length: ReplyLength;
+  onPersonaChange: (id: string) => void;
+  onLengthChange: (length: ReplyLength) => void;
+  onRegenerate: () => void;
+}
+
 interface PopoverFullHandle extends PopoverHandle {
   showLoading(): void;
   showError(err: ErrorInfo): void;
@@ -299,6 +340,7 @@ interface PopoverFullHandle extends PopoverHandle {
     onPick: (text: string) => void,
     showReviewNudge?: boolean,
   ): void;
+  setControls(controls: ControlsConfig): void;
 }
 
 function detectDark(): boolean {
@@ -410,9 +452,20 @@ function createPopoverAt(anchor: HTMLElement): PopoverFullHandle {
       .btn:hover { filter: brightness(1.05); }
       .btn:focus-visible { outline: 2px solid var(--xrb-accent); outline-offset: 2px; }
       .btn.ghost { background: transparent; color: inherit; border: 1px solid var(--xrb-border); }
+      .controls { display: flex; gap: 6px; align-items: center; padding: 4px 6px 8px; flex-wrap: wrap; }
+      .controls select { all: unset; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--xrb-border); background: transparent; color: var(--xrb-fg); font-size: 12px; cursor: pointer; }
+      .controls select:focus-visible { outline: 2px solid var(--xrb-accent); outline-offset: 2px; }
+      .seg { display: inline-flex; border: 1px solid var(--xrb-border); border-radius: 999px; overflow: hidden; }
+      .seg button { all: unset; cursor: pointer; padding: 4px 10px; font-size: 11px; color: var(--xrb-fg); }
+      .seg button.active { background: var(--xrb-accent); color: white; }
+      .icon-btn { all: unset; cursor: pointer; padding: 4px 8px; border-radius: 999px; border: 1px solid var(--xrb-border); font-size: 12px; color: var(--xrb-fg); }
+      .icon-btn:hover { background: var(--xrb-card-hover); }
+      .icon-btn:focus-visible { outline: 2px solid var(--xrb-accent); outline-offset: 2px; }
+      .grow { flex: 1; }
     </style>
     <div class="wrap" role="dialog" aria-label="X Reply Booster suggestions">
       <div class="head"><span>✨ Suggestions</span><span class="meta" data-slot="meta"></span></div>
+      <div class="controls" data-slot="controls"></div>
       <div class="list" data-slot="body"></div>
       <div class="row" data-slot="footer"></div>
     </div>
@@ -423,6 +476,7 @@ function createPopoverAt(anchor: HTMLElement): PopoverFullHandle {
   const body = shadow.querySelector<HTMLElement>('[data-slot="body"]')!;
   const meta = shadow.querySelector<HTMLElement>('[data-slot="meta"]')!;
   const footer = shadow.querySelector<HTMLElement>('[data-slot="footer"]')!;
+  const controlsSlot = shadow.querySelector<HTMLElement>('[data-slot="controls"]')!;
 
   let closed = false;
   const close = () => {
@@ -463,8 +517,71 @@ function createPopoverAt(anchor: HTMLElement): PopoverFullHandle {
     showSuggestions(items, remaining, onPick, showReviewNudge) {
       renderSuggestions({ body, footer, meta, items, remaining, onPick, showReviewNudge });
     },
+    setControls(cfg) {
+      renderControls(controlsSlot, cfg);
+    },
   };
   return handle;
+}
+
+/**
+ * 팝오버 상단 컨트롤 바: 퍼소나 드롭다운 + 길이 토글 + Regenerate 버튼.
+ * 컨트롤 변경 시 콜백을 통해 즉시 재생성. 퍼소나 0개면 "no persona" 안내.
+ */
+function renderControls(slot: HTMLElement, cfg: ControlsConfig) {
+  slot.textContent = '';
+
+  // 퍼소나 드롭다운
+  if (cfg.personas.length > 0) {
+    const select = document.createElement('select');
+    select.title = 'Switch persona — voice changes immediately';
+    select.setAttribute('aria-label', 'Persona');
+    for (const p of cfg.personas) {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      if (p.id === cfg.activePersonaId) opt.selected = true;
+      select.appendChild(opt);
+    }
+    select.addEventListener('change', () => cfg.onPersonaChange(select.value));
+    slot.appendChild(select);
+  }
+
+  // 길이 토글 (Short / Medium / Long)
+  const seg = document.createElement('div');
+  seg.className = 'seg';
+  seg.setAttribute('role', 'group');
+  seg.setAttribute('aria-label', 'Reply length');
+  const lengths: { value: ReplyLength; label: string }[] = [
+    { value: 'short', label: 'S' },
+    { value: 'medium', label: 'M' },
+    { value: 'long', label: 'L' },
+  ];
+  for (const { value, label } of lengths) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.title = `${value.charAt(0).toUpperCase() + value.slice(1)} replies`;
+    b.setAttribute('aria-pressed', String(value === cfg.length));
+    if (value === cfg.length) b.className = 'active';
+    b.addEventListener('click', () => cfg.onLengthChange(value));
+    seg.appendChild(b);
+  }
+  slot.appendChild(seg);
+
+  // 우측 정렬용 spacer
+  const spacer = document.createElement('span');
+  spacer.className = 'grow';
+  slot.appendChild(spacer);
+
+  // Regenerate 버튼
+  const regen = document.createElement('button');
+  regen.type = 'button';
+  regen.className = 'icon-btn';
+  regen.textContent = '↻ Regenerate';
+  regen.title = 'Generate 3 new variants with the same input';
+  regen.addEventListener('click', () => cfg.onRegenerate());
+  slot.appendChild(regen);
 }
 
 // ──────────────────────────────────────────────────────────────────────────

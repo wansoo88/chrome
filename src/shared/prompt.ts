@@ -1,4 +1,5 @@
 import type { GenerateMode, Persona } from './types';
+import type { ReplyLength } from './messages';
 
 /**
  * 프롬프트 조립 — 핵심 지적 자산.
@@ -15,7 +16,15 @@ export interface BuildPromptInput {
   originalTweet?: string | null;
   draft?: string | null;
   languagePref: 'auto' | string;
+  /** 답변 길이. 미지정 시 'medium'. */
+  length?: ReplyLength;
 }
+
+const LENGTH_RULES: Record<ReplyLength, string> = {
+  short: 'Each reply must be SHORT — 1 to 8 words, sentence fragment OK. Punchy. No filler.',
+  medium: 'Each reply must be MEDIUM length — one complete sentence, ~80-180 characters.',
+  long: 'Each reply must be LONG — 2 to 3 sentences, up to 280 characters total. Add nuance or context.',
+};
 
 export interface PromptPair {
   system: string;
@@ -31,7 +40,8 @@ function joinExamples(examples: string[]): string {
 }
 
 export function buildPrompt(input: BuildPromptInput): PromptPair {
-  const { mode, persona, originalTweet, draft, languagePref } = input;
+  const { mode, persona, originalTweet, draft, languagePref, length = 'medium' } = input;
+  const lengthRule = LENGTH_RULES[length];
 
   // system 블록이지만 mode에 따라 기본 언어 폴백이 다름 — reply는 원문 언어에 맞추고,
   // threadHint는 사용자가 이미 쓰기 시작한 언어(draft) 우선. 명시적 languagePref가 있으면 그 값 고정.
@@ -50,7 +60,8 @@ export function buildPrompt(input: BuildPromptInput): PromptPair {
     '',
     'Rules:',
     `- ${languageDirective}`,
-    '- Keep each reply under 280 characters.',
+    `- ${lengthRule}`,
+    '- Always under 280 characters total.',
     '- No em-dashes. No bullet points. No hashtags unless they appear in the examples.',
     '- Do not prepend greetings ("Hey", "Hi") unless the examples do.',
     '- Sound like the examples — if they are terse, be terse; if they joke, joke.',

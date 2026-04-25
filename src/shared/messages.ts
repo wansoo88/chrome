@@ -9,12 +9,16 @@ import type { GenerateMode, KeyConfig } from './types';
  * - 모든 응답은 discriminated union으로 타입 좁힘 단순화.
  */
 
+export type ReplyLength = 'short' | 'medium' | 'long';
+
 export interface GenerateRequest {
   kind: 'generate';
   mode: GenerateMode;
   originalTweet?: string | null;
   draft?: string | null;
   personaId: string | null;
+  /** 답변 길이. 미지정 시 'medium'. */
+  length?: ReplyLength;
 }
 
 export interface PingRequest {

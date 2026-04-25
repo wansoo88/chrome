@@ -203,6 +203,7 @@ async function handleGenerate(
     originalTweet: req.originalTweet ?? null,
     draft: req.draft ?? null,
     languagePref: state.settings.languagePref,
+    length: req.length ?? 'medium',
   });
 
   let suggestions: string[];
