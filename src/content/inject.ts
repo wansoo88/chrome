@@ -218,10 +218,22 @@ async function openPopoverFor(textarea: HTMLElement, anchor: HTMLElement): Promi
     return;
   }
   if (res.kind === 'generateOk') {
-    ui.showSuggestions(res.suggestions, res.remainingToday, (text) => {
-      insertIntoTextarea(textarea, text);
-      ui.close();
-    });
+    // 리뷰 넛지 트리거: 삽입 3회 이상 + 아직 안 물어봤으면 카드 위에 1줄 표시 후 close 시 1회만.
+    const showReviewNudge =
+      (res.totalGenerated ?? 0) >= 3 && !res.reviewAsked;
+    ui.showSuggestions(
+      res.suggestions,
+      res.remainingToday,
+      (text) => {
+        insertIntoTextarea(textarea, text);
+        // 삽입 카운트 + 주간 stat 갱신 (백그라운드, 응답 무시).
+        chrome.runtime
+          .sendMessage({ kind: 'recordInsert' })
+          .catch(() => void 0);
+        ui.close();
+      },
+      showReviewNudge,
+    );
     return;
   }
   ui.showError({ message: t('err_unknown'), code: 'INVALID_RESPONSE' });
@@ -285,6 +297,7 @@ interface PopoverFullHandle extends PopoverHandle {
     suggestions: string[],
     remaining: number | null,
     onPick: (text: string) => void,
+    showReviewNudge?: boolean,
   ): void;
 }
 
@@ -447,8 +460,8 @@ function createPopoverAt(anchor: HTMLElement): PopoverFullHandle {
     showError(err) {
       renderError({ body, footer, meta, err });
     },
-    showSuggestions(items, remaining, onPick) {
-      renderSuggestions({ body, footer, meta, items, remaining, onPick });
+    showSuggestions(items, remaining, onPick, showReviewNudge) {
+      renderSuggestions({ body, footer, meta, items, remaining, onPick, showReviewNudge });
     },
   };
   return handle;
@@ -536,6 +549,7 @@ function renderSuggestions({
   items,
   remaining,
   onPick,
+  showReviewNudge,
 }: {
   body: HTMLElement;
   footer: HTMLElement;
@@ -543,10 +557,37 @@ function renderSuggestions({
   items: string[];
   remaining: number | null;
   onPick: (text: string) => void;
+  showReviewNudge?: boolean;
 }) {
   body.textContent = '';
   body.setAttribute('role', 'listbox');
   body.setAttribute('tabindex', '-1');
+
+  // 리뷰 넛지: 카드 위에 1줄 표시 (1회성). 클릭 시 스토어 리뷰 페이지 + reviewAsked=true 마킹.
+  if (showReviewNudge) {
+    const nudge = document.createElement('div');
+    nudge.style.cssText =
+      'padding:8px 10px;margin-bottom:8px;border-radius:8px;background:rgba(29,155,240,0.1);font-size:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;';
+    const text = document.createElement('span');
+    text.textContent = '⭐ Loving it? A 30-second review unblocks another builder.';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn';
+    btn.style.cssText = 'padding:4px 10px;font-size:11px;';
+    btn.textContent = 'Rate on Store';
+    btn.addEventListener('click', () => {
+      const id = chrome.runtime.id;
+      chrome.tabs
+        .create({ url: `https://chromewebstore.google.com/detail/${id}/reviews` })
+        .catch(() => void 0);
+      // background에 1회성 마킹 요청.
+      chrome.runtime.sendMessage({ kind: 'markReviewAsked' }).catch(() => void 0);
+      nudge.remove();
+    });
+    nudge.appendChild(text);
+    nudge.appendChild(btn);
+    body.appendChild(nudge);
+  }
 
   const cards: HTMLElement[] = items.map((text, idx) => {
     const card = document.createElement('div');

@@ -3,6 +3,7 @@ import type {
   License,
   Persona,
   Settings,
+  Stats,
   StorageSchema,
   UsageDay,
 } from './types';
@@ -39,6 +40,13 @@ const DEFAULT_LICENSE: License = {
   trialEmail: null,
 };
 
+const DEFAULT_STATS: Stats = {
+  totalGenerated: 0,
+  totalInserted: 0,
+  reviewAsked: false,
+  weeklyInserted: [],
+};
+
 function todayIso(): string {
   const d = new Date();
   const y = d.getFullYear();
@@ -59,6 +67,7 @@ function defaultState(): StorageSchema {
     settings: { ...DEFAULT_SETTINGS },
     license: { ...DEFAULT_LICENSE },
     usage: defaultUsage(),
+    stats: { ...DEFAULT_STATS, weeklyInserted: [] },
   };
 }
 
@@ -76,6 +85,13 @@ function mergeState(raw: Partial<StorageSchema>): StorageSchema {
   };
   const license = migrateLicense(rawLicense, raw.version);
 
+  const rawStats = (raw.stats ?? {}) as Partial<Stats>;
+  const stats: Stats = {
+    ...DEFAULT_STATS,
+    ...rawStats,
+    weeklyInserted: Array.isArray(rawStats.weeklyInserted) ? rawStats.weeklyInserted : [],
+  };
+
   return {
     version: SCHEMA_VERSION,
     keyConfig: raw.keyConfig ?? null,
@@ -86,6 +102,7 @@ function mergeState(raw: Partial<StorageSchema>): StorageSchema {
       raw.usage && typeof raw.usage.isoDate === 'string'
         ? raw.usage
         : defaultUsage(),
+    stats,
   };
 }
 
@@ -207,6 +224,47 @@ export async function incrementUsage(): Promise<UsageDay> {
     s.usage.count += 1;
   });
   return next.usage;
+}
+
+/**
+ * stats.totalGenerated += 1 (3안 받았을 때 호출). background에서 호출.
+ */
+export async function incrementGenerated(): Promise<Stats> {
+  const next = await updateState((s) => {
+    s.stats.totalGenerated += 1;
+  });
+  return next.stats;
+}
+
+/**
+ * stats.totalInserted += 1 + weeklyInserted 갱신 (오늘 카운트 +1, 7일 슬라이딩).
+ * content script(또는 background 메시지 경유)에서 카드 클릭 → 삽입 직후 호출.
+ */
+export async function incrementInserted(): Promise<Stats> {
+  const today = todayIso();
+  const next = await updateState((s) => {
+    s.stats.totalInserted += 1;
+    const idx = s.stats.weeklyInserted.findIndex((d) => d.isoDate === today);
+    if (idx >= 0) {
+      s.stats.weeklyInserted[idx]!.count += 1;
+    } else {
+      s.stats.weeklyInserted.push({ isoDate: today, count: 1 });
+    }
+    // 최근 7일만 유지.
+    s.stats.weeklyInserted = s.stats.weeklyInserted
+      .sort((a, b) => a.isoDate.localeCompare(b.isoDate))
+      .slice(-7);
+  });
+  return next.stats;
+}
+
+/**
+ * 리뷰 넛지 1회성 표시 마킹.
+ */
+export async function markReviewAsked(): Promise<void> {
+  await updateState((s) => {
+    s.stats.reviewAsked = true;
+  });
 }
 
 export function onStateChanged(

@@ -30,11 +30,23 @@ export interface VerifyKeyRequest {
   cfg: KeyConfig;
 }
 
+/** 카드 클릭하여 textarea에 답변 삽입 직후 호출. stats.totalInserted++. */
+export interface RecordInsertRequest {
+  kind: 'recordInsert';
+}
+
+/** 리뷰 넛지 클릭(또는 닫힘) 시 1회성 마킹. stats.reviewAsked = true. */
+export interface MarkReviewAskedRequest {
+  kind: 'markReviewAsked';
+}
+
 export type ClientMsg =
   | GenerateRequest
   | PingRequest
   | GetOverviewRequest
-  | VerifyKeyRequest;
+  | VerifyKeyRequest
+  | RecordInsertRequest
+  | MarkReviewAskedRequest;
 
 export type ErrorCode =
   | 'API_KEY_MISSING'
@@ -49,6 +61,15 @@ export interface GenerateOk {
   ok: true;
   suggestions: string[];
   remainingToday: number | null; // paid면 null.
+  /** 누적 생성 수 (3안 받은 횟수). UI에서 리뷰 넛지 트리거 판단에 사용. */
+  totalGenerated?: number;
+  /** 리뷰 넛지를 이미 노출한 적 있는지 (1회성). */
+  reviewAsked?: boolean;
+}
+
+export interface RecordInsertOk {
+  kind: 'recordInsertOk';
+  ok: true;
 }
 
 export interface Overview {
@@ -84,7 +105,13 @@ export interface ServerErr {
   providerCode?: 'invalid_key' | 'rate_limit' | 'no_quota' | 'generic';
 }
 
-export type ServerMsg = GenerateOk | Overview | Pong | VerifyKeyOk | ServerErr;
+export type ServerMsg =
+  | GenerateOk
+  | Overview
+  | Pong
+  | VerifyKeyOk
+  | RecordInsertOk
+  | ServerErr;
 
 export function asServerErr(
   code: ErrorCode,

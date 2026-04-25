@@ -3,7 +3,10 @@ import {
   ensureUsageFresh,
   getKeyConfig,
   getState,
+  incrementGenerated,
+  incrementInserted,
   incrementUsage,
+  markReviewAsked,
 } from '@/shared/storage';
 import { checkAndDowngradeExpiredTrial, licenseGateway } from '@/shared/license';
 import { asServerErr } from '@/shared/messages';
@@ -119,6 +122,17 @@ chrome.runtime.onMessage.addListener(
             }
             return;
           }
+          case 'recordInsert': {
+            const stats = await incrementInserted();
+            sendResponse({ kind: 'recordInsertOk', ok: true });
+            void stats;
+            return;
+          }
+          case 'markReviewAsked': {
+            await markReviewAsked();
+            sendResponse({ kind: 'recordInsertOk', ok: true });
+            return;
+          }
           default: {
             const _exhaustive: never = msg;
             void _exhaustive;
@@ -226,11 +240,16 @@ async function handleGenerate(
     remainingToday = Math.max(0, state.settings.dailyFreeLimit - nextUsage.count);
   }
 
+  // 성공 카운트 + 리뷰 넛지 트리거 정보 동봉.
+  const stats = await incrementGenerated();
+
   const out: GenerateOk = {
     kind: 'generateOk',
     ok: true,
     suggestions: suggestions.slice(0, 3),
     remainingToday,
+    totalGenerated: stats.totalGenerated,
+    reviewAsked: stats.reviewAsked,
   };
   return out;
 }

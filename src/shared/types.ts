@@ -56,6 +56,21 @@ export interface UsageDay {
   count: number;
 }
 
+/**
+ * 로컬-only 사용 통계. 외부 송신 없음 — Popup의 "주간 생성 수" 위젯과 리뷰 넛지 트리거용.
+ * BYOK 프라이버시 원칙과 충돌하지 않도록 net 송신 일체 없음.
+ */
+export interface Stats {
+  /** 누적 생성 성공(3안 받은 횟수). 리뷰 넛지 트리거에 사용. */
+  totalGenerated: number;
+  /** 누적 삽입 성공(카드 클릭하여 textarea에 삽입). */
+  totalInserted: number;
+  /** 리뷰 넛지를 이미 노출한 적 있는지. 1회성 보장. */
+  reviewAsked: boolean;
+  /** 일별 삽입 카운트 — 최근 7일치만 유지. Popup 주간 위젯용. */
+  weeklyInserted: { isoDate: string; count: number }[];
+}
+
 export interface StorageSchema {
   version: number;
   keyConfig: KeyConfig | null;
@@ -63,4 +78,5 @@ export interface StorageSchema {
   settings: Settings;
   license: License;
   usage: UsageDay;
+  stats: Stats;
 }

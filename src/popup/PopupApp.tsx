@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { getState, onStateChanged, setActivePersona } from '@/shared/storage';
-import type { LicenseTier, Persona, StorageSchema } from '@/shared/types';
+import type { LicenseTier, Persona, Stats, StorageSchema } from '@/shared/types';
 import { licenseGateway, trialMsRemaining } from '@/shared/license';
 
 /**
@@ -117,6 +117,9 @@ export function PopupApp() {
               Free: {limit} replies/day · 1 active persona
             </div>
           )}
+
+          <WeeklyStatWidget stats={state.stats} />
+
         </>
       )}
 
@@ -180,6 +183,37 @@ export function PopupApp() {
           {activePersona.examples.length > 0 &&
             ` · ${activePersona.examples.length} example${activePersona.examples.length > 1 ? 's' : ''}`}
         </div>
+      )}
+    </div>
+  );
+}
+
+function WeeklyStatWidget({ stats }: { stats: Stats }) {
+  // 최근 7일치 합산. 없으면 위젯 숨김 (첫 사용자에겐 정보 가치 낮음).
+  const weekTotal = stats.weeklyInserted.reduce((sum, d) => sum + d.count, 0);
+  if (weekTotal === 0 && stats.totalInserted === 0) return null;
+  // 1삽입 = ~90초 절약 가정. 분 단위 표기.
+  const savedMinutes = Math.round((weekTotal * 90) / 60);
+  return (
+    <div
+      style={{
+        marginTop: 10,
+        padding: 8,
+        borderRadius: 8,
+        background: 'rgba(0, 186, 124, 0.08)',
+        fontSize: 12,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+      }}
+    >
+      <span>
+        <b>{weekTotal}</b> replies this week
+      </span>
+      {savedMinutes > 0 && (
+        <span style={{ opacity: 0.75 }}>
+          ≈ {savedMinutes} min saved
+        </span>
       )}
     </div>
   );
