@@ -18,6 +18,11 @@ export interface BuildPromptInput {
   languagePref: 'auto' | string;
   /** 답변 길이. 미지정 시 'medium'. */
   length?: ReplyLength;
+  /**
+   * 답변 대상 트윗 위쪽의 스레드 부모들 — oldest-first.
+   * 답변이 맥락 없는 일반론으로 빠지는 것을 방지. 빈 배열이면 무시.
+   */
+  threadContext?: string[];
 }
 
 const LENGTH_RULES: Record<ReplyLength, string> = {
@@ -40,7 +45,15 @@ function joinExamples(examples: string[]): string {
 }
 
 export function buildPrompt(input: BuildPromptInput): PromptPair {
-  const { mode, persona, originalTweet, draft, languagePref, length = 'medium' } = input;
+  const {
+    mode,
+    persona,
+    originalTweet,
+    draft,
+    languagePref,
+    length = 'medium',
+    threadContext = [],
+  } = input;
   const lengthRule = LENGTH_RULES[length];
 
   // system 블록이지만 mode에 따라 기본 언어 폴백이 다름 — reply는 원문 언어에 맞추고,
@@ -69,15 +82,29 @@ export function buildPrompt(input: BuildPromptInput): PromptPair {
     '- Output only the 3 texts and separators. No numbering, no preface, no explanation.',
   ].join('\n');
 
+  // 스레드 부모 컨텍스트 — 있을 때만 별도 블록으로. 모델이 이전 대화 흐름을 이해하면
+  // 답변이 일반론에서 벗어나 실제 대화 맥락에 맞아진다.
+  const threadBlock = threadContext.length
+    ? [
+        'CONVERSATION_BEFORE (oldest first; do NOT respond to these — they are background context only):',
+        ...threadContext
+          .slice(0, 4)
+          .map((t, i) => `[${i + 1}] ${t.trim().slice(0, 600)}`),
+        '',
+      ]
+    : [];
+
   const user =
     mode === 'reply'
       ? [
           'MODE: reply',
-          'ORIGINAL_TWEET:',
+          ...threadBlock,
+          'ORIGINAL_TWEET (this is the one you are replying to):',
           (originalTweet || '').trim() || '(unknown — generate 3 standalone engaging replies)',
         ].join('\n')
       : [
           'MODE: threadHint',
+          ...threadBlock,
           'ORIGINAL_TWEET (the tweet the user is responding to; may be empty):',
           (originalTweet || '').trim() || '(none — this is a fresh compose)',
           '',

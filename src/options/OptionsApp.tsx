@@ -34,27 +34,31 @@ const PROVIDER_INFO: Record<
   { label: string; docUrl: string; modelHint: string; hideFromUi?: boolean }
 > = {
   openai: {
-    label: 'OpenAI',
+    label: 'OpenAI (ChatGPT)',
     docUrl: 'https://platform.openai.com/api-keys',
     modelHint: 'gpt-4o-mini (default) · gpt-4o · gpt-5-mini',
   },
+  anthropic: {
+    label: 'Claude (Anthropic)',
+    docUrl: 'https://console.anthropic.com/settings/keys',
+    modelHint: 'claude-3-5-haiku-latest (default) · claude-3-5-sonnet-latest',
+  },
+  gemini: {
+    label: 'Gemini (Google)',
+    docUrl: 'https://aistudio.google.com/app/apikey',
+    modelHint: 'gemini-2.0-flash (default) · gemini-1.5-flash · gemini-1.5-pro',
+  },
   openrouter: {
-    label: 'OpenRouter',
+    label: 'OpenRouter (advanced)',
     docUrl: 'https://openrouter.ai/keys',
     modelHint:
       'openai/gpt-4o-mini (default) · anthropic/claude-3.5-haiku · many more',
   },
-  anthropic: {
-    label: 'Anthropic (advanced)',
-    docUrl: 'https://console.anthropic.com/settings/keys',
-    modelHint: 'claude-3-5-haiku-latest · may require CORS override',
-    hideFromUi: true,
-  },
 };
 
-const UI_PROVIDERS: Provider[] = (
-  Object.keys(PROVIDER_INFO) as Provider[]
-).filter((p) => !PROVIDER_INFO[p].hideFromUi);
+// Display order for the dropdown.
+const UI_PROVIDERS: Provider[] = (['openai', 'anthropic', 'gemini', 'openrouter'] as Provider[])
+  .filter((p) => !PROVIDER_INFO[p].hideFromUi);
 
 export function OptionsApp() {
   const [state, setState] = useState<StorageSchema | null>(null);
@@ -78,8 +82,13 @@ export function OptionsApp() {
   return (
     <div className="page">
       <h1>✨ X Reply Booster</h1>
-      <div className="muted">
-        Your voice on X. Pay once $3.99. Bring your own AI key — it never leaves your browser.
+      <div style={{ fontSize: 15, lineHeight: 1.5, marginTop: 4 }}>
+        <b>Stop posting AI-flavored replies.</b> Paste 5 of your real tweets — the AI types like
+        you, not like ChatGPT.
+      </div>
+      <div className="muted" style={{ marginTop: 6, fontSize: 13 }}>
+        Free with Gemini (no card) · $19.99 once for unlimited. Your key stays in your browser —
+        the developer never sees it.
       </div>
 
       <OnboardingStepper state={state} />
@@ -122,7 +131,11 @@ function OnboardingStepper({ state }: { state: StorageSchema }) {
     {
       label: 'Connect AI',
       done: keyVerified || keyDone,
-      hint: keyVerified ? 'verified' : keyDone ? 'saved, not yet verified' : 'add your API key',
+      hint: keyVerified
+        ? 'verified'
+        : keyDone
+          ? 'saved, not yet verified'
+          : 'start free with Gemini — no card needed (1 min)',
     },
     {
       label: 'Create persona',
@@ -166,8 +179,9 @@ function OnboardingStepper({ state }: { state: StorageSchema }) {
 // ──────────────────────────────────────────────────────────────────────────
 
 function KeySection({ current }: { current: KeyConfig | null }) {
+  // 새 유저는 Gemini로 시작(무료 티어). 이미 설정한 유저는 기존 선택 유지.
   const initialProvider: Provider =
-    current && UI_PROVIDERS.includes(current.provider) ? current.provider : 'openai';
+    current && UI_PROVIDERS.includes(current.provider) ? current.provider : 'gemini';
   const [provider, setProvider] = useState<Provider>(initialProvider);
   const [apiKey, setApiKey] = useState<string>(current?.apiKey ?? '');
   const [model, setModel] = useState<string>(current?.model ?? defaultModelFor(provider));
@@ -230,18 +244,17 @@ function KeySection({ current }: { current: KeyConfig | null }) {
     <div className="card">
       <div className="field">
         <label>Provider</label>
-        <div className="chips">
+        <select
+          value={provider}
+          onChange={(e) => setProvider(e.target.value as Provider)}
+        >
           {UI_PROVIDERS.map((p) => (
-            <button
-              type="button"
-              key={p}
-              className={`chip ${p === provider ? 'active' : ''}`}
-              onClick={() => setProvider(p)}
-            >
+            <option key={p} value={p}>
               {PROVIDER_INFO[p].label}
-            </button>
+              {p === 'gemini' ? ' — Free tier' : ''}
+            </option>
           ))}
-        </div>
+        </select>
         <div className="hint">
           New to {info.label}?{' '}
           <a href={info.docUrl} target="_blank" rel="noreferrer">
@@ -249,6 +262,26 @@ function KeySection({ current }: { current: KeyConfig | null }) {
           </a>
           .
         </div>
+        {provider === 'gemini' && (
+          <div
+            style={{
+              marginTop: 10,
+              padding: 10,
+              borderRadius: 8,
+              background: 'rgba(34, 197, 94, 0.08)',
+              border: '1px solid rgba(34, 197, 94, 0.25)',
+              fontSize: 13,
+              lineHeight: 1.5,
+            }}
+          >
+            🆓 <b>Free — no credit card required.</b> Google AI Studio gives 1,500 requests/day on{' '}
+            <code>gemini-2.0-flash</code>. Sign in with any Google account, click <i>Create API key</i>,
+            paste below. Takes about 1 minute.{' '}
+            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">
+              Open AI Studio →
+            </a>
+          </div>
+        )}
       </div>
 
       <div className="field">
@@ -279,15 +312,24 @@ function KeySection({ current }: { current: KeyConfig | null }) {
       <details className="field">
         <summary className="muted" style={{ cursor: 'pointer' }}>How much will it cost?</summary>
         <div className="hint" style={{ marginTop: 8 }}>
-          With <code>gpt-4o-mini</code>-class models, each reply costs roughly <b>$0.001</b>.
-          A heavy power user (~50 replies/day) spends <b>~$1.50/month</b>. You can cap spending in
+          With <code>gpt-4o-mini</code> · <code>claude-3-5-haiku</code> · <code>gemini-2.0-flash</code>-class
+          models, each reply costs roughly <b>$0.001</b>. A heavy power user (~50 replies/day) spends{' '}
+          <b>~$1.50/month</b>. <b>Gemini</b> has a generous free tier on AI Studio. Cap spending in
           your provider dashboard:{' '}
           <a href="https://platform.openai.com/settings/organization/limits" target="_blank" rel="noreferrer">
-            OpenAI limits
+            OpenAI
+          </a>{' '}
+          ·{' '}
+          <a href="https://console.anthropic.com/settings/limits" target="_blank" rel="noreferrer">
+            Anthropic
+          </a>{' '}
+          ·{' '}
+          <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer">
+            Google AI Studio
           </a>{' '}
           ·{' '}
           <a href="https://openrouter.ai/settings/credits" target="_blank" rel="noreferrer">
-            OpenRouter credits
+            OpenRouter
           </a>
           .
         </div>
@@ -510,9 +552,28 @@ function PersonaEditor({ persona, onClose }: { persona: Persona; onClose: () => 
     persona.examples.length ? persona.examples : [''],
   );
   const [saved, setSaved] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkText, setBulkText] = useState('');
 
   const filledCount = examples.filter((e) => e.trim()).length;
   const atCap = examples.length >= 10;
+
+  // 빈 줄로 구분된 트윗을 한꺼번에 받아 examples 슬롯에 분배.
+  // - 빈 줄(\n\n+) 우선, 없으면 단일 \n도 분리자로 폴백 (단순 트윗 N줄 붙여넣기 케이스).
+  // - 280자 잘림, 빈 항목 제거, 최대 10개 합산.
+  function applyBulk() {
+    const raw = bulkText.trim();
+    if (!raw) return;
+    let pieces = raw.split(/\n\s*\n+/).map((s) => s.trim()).filter(Boolean);
+    if (pieces.length < 2) {
+      pieces = raw.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+    }
+    const existing = examples.map((e) => e.trim()).filter(Boolean);
+    const combined = [...existing, ...pieces].map((s) => s.slice(0, 280)).slice(0, 10);
+    setExamples(combined.length ? combined : ['']);
+    setBulkText('');
+    setBulkOpen(false);
+  }
 
   async function onSave() {
     const trimmed = examples.map((e) => e.trim()).filter(Boolean);
@@ -596,10 +657,62 @@ function PersonaEditor({ persona, onClose }: { persona: Persona; onClose: () => 
           >
             + Add example
           </button>
+          <button
+            type="button"
+            className="small-btn"
+            onClick={() => setBulkOpen((v) => !v)}
+            disabled={atCap}
+            title="Paste several tweets at once"
+          >
+            {bulkOpen ? '↑ Hide bulk paste' : '↓ Bulk paste'}
+          </button>
           <span className="muted">
             {filledCount} used / 10 {atCap && ' · limit reached (more examples dilute the voice)'}
           </span>
         </div>
+
+        {bulkOpen && (
+          <div
+            style={{
+              marginTop: 10,
+              padding: 10,
+              borderRadius: 8,
+              background: 'rgba(0,0,0,0.03)',
+              border: '1px dashed var(--border)',
+            }}
+          >
+            <div className="hint" style={{ marginBottom: 6 }}>
+              Paste tweets separated by a blank line (or one per line). We'll fill empty slots up to 10.
+            </div>
+            <textarea
+              value={bulkText}
+              onChange={(e) => setBulkText(e.target.value)}
+              placeholder={"Tweet 1 here\n\nTweet 2 here\n\nTweet 3 here"}
+              rows={6}
+              style={{ width: '100%' }}
+            />
+            <div className="row" style={{ marginTop: 6 }}>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={applyBulk}
+                disabled={!bulkText.trim()}
+              >
+                Add to examples
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setBulkText('');
+                  setBulkOpen(false);
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="row">

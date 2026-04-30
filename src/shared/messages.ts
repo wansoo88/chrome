@@ -19,6 +19,11 @@ export interface GenerateRequest {
   personaId: string | null;
   /** 답변 길이. 미지정 시 'medium'. */
   length?: ReplyLength;
+  /**
+   * 스레드 부모 트윗들 — oldest-first. originalTweet 위쪽에 있던 대화 흐름.
+   * 답변이 맥락 없는 일반론이 되는 것을 방지. content script가 채움.
+   */
+  threadContext?: string[];
 }
 
 export interface PingRequest {
@@ -44,13 +49,23 @@ export interface MarkReviewAskedRequest {
   kind: 'markReviewAsked';
 }
 
+/**
+ * Popover/Options에서 직접 결제 흐름을 트리거 — content script는 chrome.tabs 권한을
+ * licenseGateway 경유로만 사용해야 하므로 background에 위임.
+ */
+export interface OpenCheckoutRequest {
+  kind: 'openCheckout';
+  tier: 'monthly' | 'lifetime';
+}
+
 export type ClientMsg =
   | GenerateRequest
   | PingRequest
   | GetOverviewRequest
   | VerifyKeyRequest
   | RecordInsertRequest
-  | MarkReviewAskedRequest;
+  | MarkReviewAskedRequest
+  | OpenCheckoutRequest;
 
 export type ErrorCode =
   | 'API_KEY_MISSING'

@@ -65,6 +65,8 @@ export async function generate(opts: GenerateOpts): Promise<string[]> {
       });
     case 'anthropic':
       return callAnthropic(opts);
+    case 'gemini':
+      return callGemini(opts);
   }
 }
 
@@ -133,6 +135,36 @@ async function callAnthropic({ cfg, prompt, signal }: GenerateOpts): Promise<str
     data.content
       ?.filter((c) => c.type === 'text')
       .map((c) => c.text ?? '')
+      .join('\n') ?? '';
+  return parseSuggestions(text);
+}
+
+async function callGemini({ cfg, prompt, signal }: GenerateOpts): Promise<string[]> {
+  // Google Generative Language API. 키는 query string으로 전달(공식 권장).
+  const model = cfg.model || 'gemini-2.0-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    model,
+  )}:generateContent?key=${encodeURIComponent(cfg.apiKey)}`;
+  const res = await fetchWithTimeoutAndRetry(
+    url,
+    {
+      method: 'POST',
+      signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: prompt.system }] },
+        contents: [{ role: 'user', parts: [{ text: prompt.user }] }],
+        generationConfig: { temperature: 0.8, maxOutputTokens: 1024 },
+      }),
+    },
+    'Gemini',
+  );
+  const data = (await res.json()) as {
+    candidates?: { content?: { parts?: { text?: string }[] } }[];
+  };
+  const text =
+    data.candidates?.[0]?.content?.parts
+      ?.map((p) => p.text ?? '')
       .join('\n') ?? '';
   return parseSuggestions(text);
 }
@@ -290,6 +322,14 @@ export async function verifyKey(cfg: KeyConfig): Promise<{ ok: boolean; error?: 
         if (r.ok) return { ok: true };
         return { ok: false, error: await readErrMessage(r) };
       }
+      case 'gemini': {
+        // 모델 목록 조회는 토큰을 거의 안 쓰면서 키 유효성을 확인하기 좋음.
+        const r = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(cfg.apiKey)}`,
+        );
+        if (r.ok) return { ok: true };
+        return { ok: false, error: await readErrMessage(r) };
+      }
     }
   } catch (e) {
     return { ok: false, error: (e as Error).message };
@@ -314,6 +354,8 @@ export function defaultModelFor(provider: KeyConfig['provider']): string {
       return 'gpt-4o-mini';
     case 'anthropic':
       return 'claude-3-5-haiku-latest';
+    case 'gemini':
+      return 'gemini-2.0-flash';
     case 'openrouter':
       return 'openai/gpt-4o-mini';
   }

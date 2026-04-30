@@ -2,7 +2,7 @@ import type { ClientMsg, ReplyLength, ServerMsg } from '@/shared/messages';
 import { setLocale, t } from '@/shared/i18n';
 import { getState, onStateChanged } from '@/shared/storage';
 import type { Persona } from '@/shared/types';
-import { findComposeTextareas, findOriginalTweet } from './selectors';
+import { findComposeTextareas, findOriginalTweet, findThreadContext } from './selectors';
 
 // content script 초기 locale 동기화. injectStart에서 호출되도록 모듈 스코프에서 시작.
 void getState().then((s) => setLocale(s.settings.languagePref));
@@ -190,6 +190,7 @@ async function openPopoverFor(textarea: HTMLElement, anchor: HTMLElement): Promi
 
   const draft = readDraft(textarea);
   const original = findOriginalTweet(textarea);
+  const threadContext = findThreadContext(textarea);
   const mode: 'reply' | 'threadHint' = draft.length > 0 ? 'threadHint' : 'reply';
 
   // 퍼소나 목록 + 활성 ID는 storage에서 직접 조회. content script도 storage 권한 있음.
@@ -234,6 +235,7 @@ async function openPopoverFor(textarea: HTMLElement, anchor: HTMLElement): Promi
       draft: mode === 'threadHint' ? draft : null,
       personaId: currentPersonaId,
       length: currentLength,
+      threadContext: threadContext.length > 0 ? threadContext : undefined,
     };
     let res: ServerMsg | undefined;
     try {
@@ -607,6 +609,13 @@ function renderError({
 }) {
   body.textContent = '';
   meta.textContent = '';
+
+  // QUOTA_EXCEEDED는 가장 결제 동기 강한 시점. 평범한 에러 박스 대신 비교 카드로 표시.
+  if (err.code === 'QUOTA_EXCEEDED') {
+    renderQuotaUpgrade(body, footer, err);
+    return;
+  }
+
   const div = document.createElement('div');
   div.className = 'err';
   const head = document.createElement('div');
@@ -626,13 +635,7 @@ function renderError({
 
   // 에러 코드별 버튼 분기 — 유저를 다음 action에 가장 가까운 경로로 보냄.
   const buttons: HTMLElement[] = [];
-  if (err.code === 'QUOTA_EXCEEDED') {
-    buttons.push(
-      btn(t('btn_upgrade'), 'primary', () => {
-        chrome.runtime.openOptionsPage?.();
-      }),
-    );
-  } else if (err.code === 'API_KEY_MISSING' || err.providerCode === 'invalid_key') {
+  if (err.code === 'API_KEY_MISSING' || err.providerCode === 'invalid_key') {
     buttons.push(
       btn(t('btn_add_key'), 'primary', () => {
         chrome.runtime.openOptionsPage?.();
@@ -663,6 +666,72 @@ function btn(label: string, variant: 'primary' | 'ghost', onClick: () => void): 
   b.textContent = label;
   b.addEventListener('click', onClick);
   return b;
+}
+
+/**
+ * Quota 초과 = 결제 동기가 가장 강한 시점. 일반 에러 박스 대신:
+ *   1) 한도 도달 사실을 부드럽게
+ *   2) Free vs Pro 차이를 시각적 비교
+ *   3) Lifetime / Monthly 버튼을 popover 안에서 직접 (Options 이동 마찰 제거)
+ *
+ * BYOK 프라이버시 원칙은 유지 — 결제 흐름만 background로 위임.
+ */
+function renderQuotaUpgrade(body: HTMLElement, footer: HTMLElement, err: ErrorInfo) {
+  body.textContent = '';
+  footer.textContent = '';
+
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'display:flex;flex-direction:column;gap:10px;';
+
+  const head = document.createElement('div');
+  head.style.cssText = 'font-weight:700;font-size:14px;';
+  head.textContent = err.message;
+  wrap.appendChild(head);
+
+  const compare = document.createElement('div');
+  compare.style.cssText =
+    'padding:8px 10px;border-radius:8px;background:rgba(29,155,240,0.08);font-size:12px;line-height:1.5;';
+  compare.innerHTML = `
+    <div style="font-weight:600;margin-bottom:4px;">Pro unlocks:</div>
+    <div>· Unlimited replies (vs 5/day)</div>
+    <div>· 10 personas (vs 1)</div>
+    <div>· Thread hint mode</div>
+    <div style="margin-top:6px;opacity:.75;">TweetHunter $49/mo · Hypefury $19/mo · this $19.99 once.</div>
+  `;
+  wrap.appendChild(compare);
+
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:8px;';
+  const lifetime = document.createElement('button');
+  lifetime.type = 'button';
+  lifetime.className = 'btn';
+  lifetime.style.cssText = 'flex:1;padding:8px 12px;font-size:13px;';
+  lifetime.innerHTML = '★ Lifetime $19.99';
+  lifetime.addEventListener('click', () => {
+    chrome.runtime
+      .sendMessage({ kind: 'openCheckout', tier: 'lifetime' })
+      .catch(() => void 0);
+  });
+  const monthly = document.createElement('button');
+  monthly.type = 'button';
+  monthly.className = 'btn ghost';
+  monthly.style.cssText = 'padding:8px 12px;font-size:13px;';
+  monthly.textContent = '$3.99/mo';
+  monthly.addEventListener('click', () => {
+    chrome.runtime
+      .sendMessage({ kind: 'openCheckout', tier: 'monthly' })
+      .catch(() => void 0);
+  });
+  btnRow.appendChild(lifetime);
+  btnRow.appendChild(monthly);
+  wrap.appendChild(btnRow);
+
+  const fine = document.createElement('div');
+  fine.style.cssText = 'font-size:11px;opacity:.65;';
+  fine.textContent = "Tomorrow you'll get 5 free again — or upgrade now to keep going.";
+  wrap.appendChild(fine);
+
+  body.appendChild(wrap);
 }
 
 function renderSuggestions({

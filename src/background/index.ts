@@ -141,6 +141,11 @@ chrome.runtime.onMessage.addListener(
             sendResponse({ kind: 'recordInsertOk', ok: true });
             return;
           }
+          case 'openCheckout': {
+            await licenseGateway.openCheckout(msg.tier);
+            sendResponse({ kind: 'recordInsertOk', ok: true });
+            return;
+          }
           default: {
             const _exhaustive: never = msg;
             void _exhaustive;
@@ -212,6 +217,7 @@ async function handleGenerate(
     draft: req.draft ?? null,
     languagePref: state.settings.languagePref,
     length: req.length ?? 'medium',
+    threadContext: req.threadContext ?? [],
   });
 
   let suggestions: string[];

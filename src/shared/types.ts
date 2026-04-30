@@ -2,7 +2,7 @@
  * 도메인 타입. 변경 시 migration 고려: 저장소는 chrome.storage.local에 버저닝되어 있다 (storage.ts).
  */
 
-export type Provider = 'openai' | 'anthropic' | 'openrouter';
+export type Provider = 'openai' | 'anthropic' | 'gemini' | 'openrouter';
 
 export interface KeyConfig {
   provider: Provider;
